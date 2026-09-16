@@ -53,7 +53,7 @@ Drop one directory per pack under the `/models` bind. Example `pack.json`:
 
 ```json
 {
-  "name": "serling",
+  "name": "alice",
   "model": "turbo-lora",
   "merged": "t3_turbo_finetuned_merged.safetensors",
   "reference": "reference.wav",
@@ -62,7 +62,7 @@ Drop one directory per pack under the `/models` bind. Example `pack.json`:
 }
 ```
 
-- `name` is the public voice id (`serling`).
+- `name` is the public voice id (`alice`).
 - `merged` is **T3 only** (base Turbo T3 with LoRA baked in), not the full Chatterbox stack.
 - Speech with that voice loads that pack’s merged T3 on the Hub Turbo backbone and uses the pack’s `reference.wav`.
 - `voices.json` aliases that are not pack names (for example `jane`) use the stock Hub engine (`__pretrained__`) plus their clone WAV.
@@ -80,7 +80,7 @@ Same idea as the Qwen image’s checkpoint cache, keyed by pack:
 | `one` | unload the previous pack before loading the next |
 | `all` | preload every discovered pack at startup (and Hub pretrained if there are no packs) |
 
-If load hits CUDA/CPU **out of memory**, the least-recent other pack is unloaded (`gc` + `empty_cache`) and the load is retried. Logs look like `memory full loading 'orwell'; unloading 'serling'`. `/health` `loaded` is the resident list.
+If load hits CUDA/CPU **out of memory**, the least-recent other pack is unloaded (`gc` + `empty_cache`) and the load is retried. Logs look like `memory full loading 'orwell'; unloading 'alice'`. `/health` `loaded` is the resident list.
 
 **Hub downloads** happen when an engine actually loads (`from_pretrained`), not on a lazy boot with no speech. Persist them with a writable `HF_HOME` volume. Packs stay on `/models`.
 
@@ -167,8 +167,8 @@ curl -sS -X POST http://127.0.0.1:8080/ui/rescan
 
 curl -sS http://127.0.0.1:8080/v1/audio/speech \
   -H 'content-type: application/json' \
-  -d '{"model":"tts-1","voice":"serling","input":"Hello from Chatterbox.","response_format":"wav"}' \
-  --output serling.wav
+  -d '{"model":"tts-1","voice":"alice","input":"Hello from Chatterbox.","response_format":"wav"}' \
+  --output alice.wav
 
 curl -sS http://127.0.0.1:8080/v1/audio/speech \
   -H 'content-type: application/json' \

@@ -190,7 +190,7 @@ class SpeechHttpTests(unittest.TestCase):
     def _client_with_packs(self, policy="lazy"):
         models = self.root / "models"
         models.mkdir()
-        self._pack(models, "serling", "GOOD-en-serling")
+        self._pack(models, "alice", "GOOD-en-alice")
         self._pack(models, "orwell", "GOOD-en-orwell")
         self.env["TTS_MODEL"] = str(models)
         self.env["TTS_LOAD_POLICY"] = policy
@@ -222,21 +222,21 @@ class SpeechHttpTests(unittest.TestCase):
 
     def test_lazy_keeps_two_packs(self):
         client, server_mod, engines = self._client_with_packs("lazy")
-        for voice in ("serling", "orwell"):
+        for voice in ("alice", "orwell"):
             res = client.post(
                 "/v1/audio/speech",
                 json={"model": "tts-1", "voice": voice, "input": "Hi", "response_format": "wav"},
             )
             self.assertEqual(res.status_code, 200, res.text)
             self.assertEqual(res.headers.get("x-tts-model"), voice)
-        self.assertEqual(set(server_mod.loaded), {"serling", "orwell"})
+        self.assertEqual(set(server_mod.loaded), {"alice", "orwell"})
         self.assertEqual(len(engines), 2)
 
     def test_one_unloads_previous_pack(self):
         client, server_mod, _engines = self._client_with_packs("one")
         client.post(
             "/v1/audio/speech",
-            json={"model": "tts-1", "voice": "serling", "input": "Hi", "response_format": "wav"},
+            json={"model": "tts-1", "voice": "alice", "input": "Hi", "response_format": "wav"},
         )
         client.post(
             "/v1/audio/speech",
@@ -248,7 +248,7 @@ class SpeechHttpTests(unittest.TestCase):
         client, server_mod, _engines = self._client_with_packs("lazy")
         client.post(
             "/v1/audio/speech",
-            json={"model": "tts-1", "voice": "serling", "input": "Hi", "response_format": "wav"},
+            json={"model": "tts-1", "voice": "alice", "input": "Hi", "response_format": "wav"},
         )
         self._oom_once = True
         res = client.post(

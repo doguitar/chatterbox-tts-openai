@@ -206,12 +206,12 @@ class DiscoverPacksTests(unittest.TestCase):
     def test_nested_pack_and_voice_overlay(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            pack = root / "GOOD-en-serling-turbo-v2-e50"
+            pack = root / "GOOD-en-alice-turbo-v2-e50"
             pack.mkdir()
             (pack / "pack.json").write_text(
                 json.dumps(
                     {
-                        "name": "serling",
+                        "name": "alice",
                         "model": "turbo-lora",
                         "reference": "reference.wav",
                         "engine": "chatterbox-turbo",
@@ -222,15 +222,15 @@ class DiscoverPacksTests(unittest.TestCase):
             (pack / "reference.wav").write_bytes(b"RIFF....WAVE")
             found = discover_packs(root)
             self.assertEqual(len(found), 1)
-            self.assertEqual(found[0][0], "serling")
+            self.assertEqual(found[0][0], "alice")
             overlays = pack_voice_overlays(found)
-            self.assertEqual(overlays[0].alias, "serling")
-            self.assertEqual(overlays[0].model, "serling")
+            self.assertEqual(overlays[0].alias, "alice")
+            self.assertEqual(overlays[0].model, "alice")
             self.assertEqual(overlays[0].kind, "voice_clone")
             wav = resolve_reference_wav(overlays[0].ref_audio, root)
             self.assertEqual(wav, (pack / "reference.wav").resolve())
             jane = VoiceOverlay("jane", "", None, "", "voice_clone", "clones/jane.wav", "")
-            self.assertEqual(resolve_pack_for_voice("serling", overlays, found)[0], "serling")
+            self.assertEqual(resolve_pack_for_voice("alice", overlays, found)[0], "alice")
             self.assertIsNone(resolve_pack_for_voice("jane", [jane], found))
             self.assertEqual(engine_cache_key(None), PRETRAINED_ENGINE_KEY)
 
