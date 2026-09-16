@@ -1,160 +1,130 @@
-# qwen3-tts-openai
+# chatterbox-tts-openai
 
-Docker image that serves one or more [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) fine-tunes behind an OpenAI-compatible API. Clients see one model (`tts-1`); `voice` selects the speaker and the matching checkpoint.
+OpenAI-compatible HTTP API for [Chatterbox TTS](https://github.com/resemble-ai/chatterbox).
 
-Images:
+Default engine is **Chatterbox-Turbo** (`TTS_VARIANT=turbo`). Voice identity is a **reference WAV preset**, not a checkpoint speaker id. `instructions` is not Qwen voice design; Chatterbox has no voice-design API. Request `speed` is accepted and ignored (`X-TTS-Speed-Ignored: 1`).
 
-| Tag | Backend |
-|---|---|
-| `:latest` / `:cpu` | CPU (PyTorch CPU wheels, smaller) |
-| `:cuda` | NVIDIA CUDA |
-| `:xpu` | Intel Arc / XPU |
-
-Mount checkpoints at `/models`. The `voice` field is `{folder}-{speaker}` (for example `alpha-alice`).
-
-## API
+## Endpoints
 
 | Method | Path | Notes |
-|---|---|---|
-| `GET` | `/` | Speakers UI |
-| `GET` | `/design` | Voice Design generate |
-| `GET` | `/clone` | One-shot voice clone |
-| `GET` | `/config` | `voices.json` editor |
-| `POST` | `/ui/rescan` | Re-read checkpoints and `voices.json` |
-| `GET` | `/health` | Status, public voices, device |
-| `GET` | `/v1/models` | One public id (`TTS_MODEL_NAME`, default `tts-1`) |
-| `GET` | `/v1/voices` | `{folder}-{speaker}` for every checkpoint |
-| `POST` | `/v1/audio/speech` | Audio body; `voice` is `{folder}-{speaker}` |
+| --- | --- | --- |
+| GET | `/health` | `ok`, `variant`, configured voice aliases |
+| GET | `/v1/models` | public id `tts-1` (override with `TTS_MODEL_NAME`) |
+| GET | `/v1/voices` | aliases from `voices.json` plus built-in `default` for `english` and `multilingual` |
+| POST | `/v1/audio/speech` | JSON or multipart clone |
+| GET | `/` `/clone` `/config` | web UI |
+| GET | `/design` | **404** — no Chatterbox equivalent |
 
-`GET /config` writes `TTS_VOICES` only when that path is writable. Save and Rescan update live voices without a process restart.
+JSON fields: `input`/`text`, `voice`, `model`, `language`, `response_format`, `speed` (ignored). Formats: `wav`, `pcm`, `mp3`, `opus`, `aac`, `flac`.
 
-```bash
-curl http://HOST:8080/v1/audio/speech \
-  -H "Content-Type: application/json" \
-  -d '{"model":"tts-1","voice":"alpha-alice","input":"Hello."}' \
-  --output out.mp3
-```
+## Variants (`TTS_VARIANT`)
 
-Optional JSON fields: `instructions`, `language`, `response_format` (`mp3`, `wav`, `pcm`, `opus`, `aac`, `flac`). OpenAI stock voice names fall back to `TTS_DEFAULT_VOICE`. Voice Design checkpoints (`tts_model_type` `voice_design`) need a non-empty instruction (preset and/or request); the server calls `generate_voice_design` and does not use `speaker`. Base checkpoints (`tts_model_type` `base`) use `generate_voice_clone` with `ref_audio` and `ref_text`. A clone preset in `voices.json` is `kind` `voice_clone` plus those fields; `/config` uploads the wav to `clones/{alias}.wav` next to `voices.json`. One-shot clone is `POST /v1/audio/speech` multipart from `/clone`.
+| Value | Class | Reference audio | Extra |
+| --- | --- | --- | --- |
+| `turbo` (default) | `ChatterboxTurboTTS.from_pretrained(device=...)` | **required** (`audio_prompt_path`) | paralinguistic tags `[laugh]` `[chuckle]` `[cough]` |
+| `nano` | `ChatterboxTurboTTS.from_pretrained(device=..., nano=True)` | **required** | same tags; intended for CPU |
+| `english` | `ChatterboxTTS.from_pretrained(device=...)` | optional; built-in `default` uses checkpoint conditionals | `TTS_EXAGGERATION`, `TTS_CFG_WEIGHT` |
+| `multilingual` | `ChatterboxMultilingualTTS.from_pretrained(device=..., t3_model=v3)` | optional | `language` → `language_id`; default T3 is v3 via `TTS_T3_MODEL` |
 
-API errors log the request body.
+`TTS_MODEL` is an optional **local checkpoint directory** passed to `from_local`. Official `from_pretrained` loaders hard-code Hugging Face repo ids, so a Hub id in `TTS_MODEL` is unused unless it is an existing local directory.
 
-## Checkpoint layout
+The Docker image installs Chatterbox from the GitHub repository so `nano=True` and multilingual `t3_model="v3"` match the current README. PyPI `chatterbox-tts==0.1.7` only exposes `from_pretrained(device)` and cannot load Nano or V3.
 
-Mount one fine-tune directory as `/models`, or a parent of per-model subfolders:
+Turbo/Nano downloads: `ResembleAI/chatterbox-turbo` or `ResembleAI/chatterbox-nano`. English/multilingual: `ResembleAI/chatterbox`. Cache is Hugging Face's default (`HF_HOME` / `~/.cache/huggingface`).
 
-```text
-/models/<id>/config.json
-/models/<id>/model.safetensors
-/models/speech_tokenizer/model.safetensors
-```
+### Multilingual language ids
 
-A flat checkpoint at `/models` (`config.json` + weights) still works. Folder names stay private; `GET /v1/models` always returns `TTS_MODEL_NAME`.
+`ar da de el en es fi fr he hi it ja ko ms nl no pl pt ru sv sw tr zh`
 
-If `speech_tokenizer/model.safetensors` is missing from the checkpoint, copy it from the matching Base model (`Qwen/Qwen3-TTS-12Hz-0.6B-Base` or `1.7B-Base`). Skip `training_state.pt` for inference.
-
-Public voices are `{folder}-{speaker}` from each checkpoint's `talker_config.spk_id`, except a unique speaker that matches its folder name is listed as that name. Optional aliases in `TTS_SPEAKERS` or `/config/voices.json` replace the long name in `GET /v1/voices`; generate still accepts the old id. `speaker` may be `{folder}-{speaker}` or a `spk_id`; request `instructions` are appended after the preset with a single space. `/config` edits that file.
+## voices.json
 
 ```json
 {
   "voices": {
-    "alice": "alice",
-    "bob": "bob",
-    "narrator": {
-      "speaker": "alpha-alice",
-      "instructions": "Male, 40s, British accent, formal and refined"
+    "jane": {
+      "kind": "voice_clone",
+      "ref_audio": "clones/jane.wav",
+      "ref_text": "Transcript of the reference clip."
     }
   }
 }
 ```
 
-## Run
+`ref_audio` must be a `.wav` under the config directory. Missing/non-WAV/out-of-root paths return HTTP 400. `ref_text` and `instructions` are metadata only; generation uses the WAV.
 
-CPU (`:latest` is this image):
-
-```bash
-docker run -d --name qwen3-tts-openai \
-  -p 8080:8080 \
-  -e TTS_DEVICE=cpu \
-  -e TTS_DEFAULT_VOICE=alice \
-  -e TTS_SPEAKERS=alice,bob \
-  -v /path/to/checkpoint:/models:ro \
-  -v /path/to/config:/config:ro \
-  ghcr.io/doguitar/qwen3-tts-openai:latest
-```
-
-NVIDIA CUDA. Use `:cuda`, not `:latest`. The CPU wheels have no CUDA kernels.
-
-```bash
-docker run -d --name qwen3-tts-openai \
-  --gpus all \
-  -p 8080:8080 \
-  -e TTS_DEVICE=cuda:0 \
-  -e TTS_DEFAULT_VOICE=alice \
-  -e TTS_SPEAKERS=alice,bob \
-  -v /path/to/checkpoint:/models:ro \
-  -v /path/to/config:/config:ro \
-  ghcr.io/doguitar/qwen3-tts-openai:cuda
-```
-
-Intel Arc (A380 / Alchemist and later). Use the `:xpu` image. The CUDA and CPU wheels have no `torch.xpu`. Pass the render node; `--gpus all` is NVIDIA-only. A380 is 6GB: use the 0.6B fine-tune. Default dtype is float32; float16 loads then crashes in `torch._assert_async` on torch 2.13+xpu.
-
-```bash
-docker run -d --name qwen3-tts-openai \
-  --device /dev/dri \
-  --group-add $(stat -c '%g' /dev/dri/renderD128) \
-  -p 8080:8080 \
-  -e TTS_DEVICE=xpu \
-  -e TTS_DEFAULT_VOICE=alice \
-  -e TTS_SPEAKERS=alice,bob \
-  -v /path/to/checkpoint:/models:ro \
-  -v /path/to/config:/config:ro \
-  ghcr.io/doguitar/qwen3-tts-openai:xpu
-```
-
-Host needs a kernel/driver that sees the Arc GPU (`i915` or `xe`) and **Resizable BAR** (Above 4G Decoding + Re-Size BAR in BIOS). A 256MB BAR is not enough: `torch.xpu` may list the GPU, then kernels fail with `could not make an engine with allocator` or SIGSEGV in `libze_intel_gpu`. `lspci -vv` should show BAR 2 at 4GB–8GB, not 256MB. The `:xpu` image must use Intel's Ubuntu **unified** GPU apt channel (`libze-intel-gpu1` 25.18+). The older **client** channel (24.39 on jammy) produces the same allocator error even with an 8GB BAR. In the container, `/health` should report `"device": "xpu"` and an `xpu_name` such as `Intel(R) Arc(TM) A380 Graphics`. Auto-detect order when `TTS_DEVICE` is unset: CUDA, then XPU, then CPU.
-
-Private GHCR packages need `docker login ghcr.io`. The package can be set public in GitHub: **Packages → qwen3-tts-openai → Package settings**.
-
-## Unraid
-
-Copy a template to `/boot/config/plugins/dockerMan/templates-user/` and add the container from the Docker tab.
-
-- CPU: [`unraid/qwen3-tts-openai-cpu.xml`](unraid/qwen3-tts-openai-cpu.xml) (`:cpu`, same as `:latest`)
-- NVIDIA: [`unraid/qwen3-tts-openai.xml`](unraid/qwen3-tts-openai.xml) (`:cuda`, `--runtime=nvidia --gpus all`)
-- Intel Arc: [`unraid/qwen3-tts-openai-xpu.xml`](unraid/qwen3-tts-openai-xpu.xml) (`:xpu`, `--device=/dev/dri --group-add 18`, `TTS_DEVICE=xpu`). Unraid 7.0+ is the realistic floor for Alchemist. Enable Resizable BAR in BIOS; 256MB BAR 2 will not run XPU inference.
-
-Host paths:
-
-- `/mnt/user/appdata/qwen3-tts-openai/models` → `/models` (checkpoint)
-- `/mnt/user/appdata/qwen3-tts-openai/config` → `/config` (optional `voices.json`)
-
-OpenAI-compatible clients: `http://HOST:PORT/v1`, model `tts-1`, `voice` = `{folder}-{speaker}`.
+One-shot clone: `multipart/form-data` with `input`, `voice`, `ref_text`, and `ref_audio`. Temporary upload is deleted after the request. Missing `ref_text` → HTTP 400.
 
 ## Environment
 
 | Variable | Default | Meaning |
-|---|---|---|
-| `TTS_MODEL` | `/models` | Fine-tune checkpoint directory, or parent of per-model subfolders |
-| `TTS_LOAD_POLICY` | `lazy` | `lazy` (load on first use), `one` (one resident), or `all` |
-| `TTS_DEFAULT_MODEL` | first sorted id | Fallback checkpoint / default voice owner |
-| `TTS_MODEL_NAME` | `tts-1` | Public model id listed by `GET /v1/models` |
-| `TTS_DEVICE` | `cuda:0`, else `xpu`, else `cpu` | Inference device (`cuda:0`, `xpu`, `cpu`) |
-| `TTS_DTYPE` | `bfloat16` on CUDA, `float32` on XPU, `float32` on CPU | Override torch dtype |
-| `TTS_SPEAKERS` | *(from checkpoint)* | Comma-separated speaker names |
-| `TTS_DEFAULT_VOICE` | first speaker | Empty or unknown `voice` in the request |
-| `TTS_VOICES` | `/config/voices.json` | Optional name → speaker map |
-| `TTS_LANGUAGE` | `English` | Default synthesis language |
-| `TTS_PORT` | `8080` | Listen port |
-| `TTS_TOKENIZER` | unset | Extra path to `speech_tokenizer/model.safetensors` |
-| `TTS_LOG_BODY_LIMIT` | `8000` | Max request-body chars logged on error |
+| --- | --- | --- |
+| `TTS_VARIANT` | `turbo` | `turbo` `nano` `english` `multilingual` |
+| `TTS_DEVICE` | auto `cuda:0` → `mps` → `cpu` | explicit torch device |
+| `TTS_MODEL` | empty | local dir for `from_local`; else official `from_pretrained` |
+| `TTS_T3_MODEL` | `v3` | multilingual T3 (`v2` or `v3`) |
+| `TTS_VOICES` | `/config/voices.json` | presets |
+| `TTS_MODEL_NAME` | `tts-1` | public `/v1/models` id |
+| `TTS_LANGUAGE` | `en` | default `language_id` |
+| `TTS_DEFAULT_VOICE` | first listed | default alias |
+| `TTS_LOAD_POLICY` | `lazy` | `lazy` (load on first request) or `one` (load at startup). `all` is rejected |
+| `TTS_EXAGGERATION` | unset | english/multilingual `exaggeration` |
+| `TTS_CFG_WEIGHT` | unset | english/multilingual `cfg_weight` |
+| `TTS_HOST` / `TTS_PORT` | `0.0.0.0` / `8080` | bind |
 
-## Build
-
-`qwen-tts==0.1.1` requires `transformers==4.57.3` and OS `sox`. Default image is CPU (Ubuntu 22.04, Torch 2.5.1 CPU wheels). CUDA image: Torch 2.5.1 cu124. XPU image: official PyTorch `whl/xpu` wheels plus Intel Level Zero userspace. Gradio is not installed. Apt and Python deps are shared layers; torch is per backend; app files are the last two layers so a code-only change is a small pull.
+## Docker
 
 ```bash
-docker build --build-arg TORCH_BACKEND=cpu -t qwen3-tts-openai:cpu .
-docker build --build-arg TORCH_BACKEND=cuda -t qwen3-tts-openai:cuda .
-docker build --build-arg TORCH_BACKEND=xpu -t qwen3-tts-openai:xpu .
+docker build --build-arg TORCH_BACKEND=cpu -t chatterbox-tts-openai:cpu .
+docker build --build-arg TORCH_BACKEND=cuda -t chatterbox-tts-openai:cuda .
+
+docker run --rm -p 8080:8080 \
+  -e TTS_VARIANT=turbo \
+  -v "$PWD/config:/config" \
+  chatterbox-tts-openai:cpu
 ```
+
+CUDA:
+
+```bash
+docker run --rm --gpus all -p 8080:8080 \
+  -e TTS_DEVICE=cuda:0 \
+  -e TTS_VARIANT=turbo \
+  -v "$PWD/config:/config" \
+  ghcr.io/doguitar/chatterbox-tts-openai:cuda
+```
+
+Published images: `ghcr.io/doguitar/chatterbox-tts-openai:cpu` (`:latest`) and `:cuda`. First start downloads weights into the Hugging Face cache (add a writable `HF_HOME` volume if you want them persisted).
+
+## curl
+
+```bash
+curl -sS http://127.0.0.1:8080/health
+curl -sS http://127.0.0.1:8080/v1/voices
+
+curl -sS http://127.0.0.1:8080/v1/audio/speech \
+  -H 'content-type: application/json' \
+  -d '{"model":"tts-1","voice":"jane","input":"Hello from Chatterbox.","response_format":"wav"}' \
+  --output out.wav
+
+curl -sS http://127.0.0.1:8080/v1/audio/speech \
+  -F input='Hello from Chatterbox.' \
+  -F voice=clone \
+  -F ref_text='This is the transcript of the reference wav.' \
+  -F ref_audio=@clones/jane.wav \
+  -F response_format=wav \
+  --output clone.wav
+```
+
+Header `X-TTS-Voice-Used` is the alias actually used.
+
+## Tests
+
+```bash
+python -m unittest discover -p 'test_*.py'
+```
+
+Helper/adapter tests do not download weights.
+
+## License
+
+MIT. Chatterbox weights and package are from Resemble AI; see their repository for model terms.

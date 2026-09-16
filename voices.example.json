@@ -1,14 +1,8 @@
 {
   "voices": {
-    "alice": "alice",
-    "bob": "bob",
-    "narrator": {
-      "speaker": "alpha-alice",
-      "instructions": "Male, 40s, British accent, formal and refined"
-    },
-    "clone-jane": {
+    "jane": {
       "kind": "voice_clone",
-      "ref_audio": "clones/clone-jane.wav",
+      "ref_audio": "clones/jane.wav",
       "ref_text": "Okay. Yeah. I resent you."
     }
   }

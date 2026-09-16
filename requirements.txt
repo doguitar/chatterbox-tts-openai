@@ -1,17 +1,11 @@
-# Runtime only. qwen-tts is installed with --no-deps so Gradio is not pulled in.
-transformers==4.57.3
-accelerate==1.12.0
+# Runtime. chatterbox-tts from GitHub matches the documented Turbo/Nano/V3 loaders
+# (PyPI 0.1.7 from_pretrained(device) has no nano= or t3_model=).
+chatterbox-tts @ git+https://github.com/resemble-ai/chatterbox.git
 fastapi
 python-multipart
 uvicorn
 pydantic
-librosa
+numpy
 soundfile
-sox
-onnxruntime
-einops
-numpy<2
-qwen-omni-utils
 huggingface-hub
 safetensors
-tokenizers

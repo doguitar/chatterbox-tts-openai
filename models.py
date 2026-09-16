@@ -1,4 +1,4 @@
-"""Checkpoint catalog, load-policy, and public voice-index helpers. Pure — no torch / qwen_tts."""
+"""Engine-variant helpers and validated voice-document parsing. Pure — no torch."""
 
 from __future__ import annotations
 
@@ -7,59 +7,105 @@ import os
 from pathlib import Path
 from typing import NamedTuple
 
-WEIGHT_NAMES = ("model.safetensors", "pytorch_model.bin", "model.pth", "model.pt")
-_ALLOWED_POLICIES = frozenset({"lazy", "one", "all"})
-PUBLIC_MODEL_ALIASES = frozenset({"tts-1", "qwen3-tts"})
+PUBLIC_MODEL_ALIASES = frozenset({"tts-1", "chatterbox-tts"})
+ENGINE_VARIANTS = frozenset({"turbo", "nano", "english", "multilingual"})
+BUILTIN_DEFAULT_VOICE = "default"
+ENGINE_SAMPLE_RATE = 24000
+MULTILINGUAL_LANGUAGES = (
+    "ar",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "fi",
+    "fr",
+    "he",
+    "hi",
+    "it",
+    "ja",
+    "ko",
+    "ms",
+    "nl",
+    "no",
+    "pl",
+    "pt",
+    "ru",
+    "sv",
+    "sw",
+    "tr",
+    "zh",
+)
+
+_VARIANT_META = {
+    "turbo": {
+        "public_id": "chatterbox-turbo",
+        "voice_mode": "reference",
+        "sample_rate": ENGINE_SAMPLE_RATE,
+        "builtin_default": False,
+        "paralinguistic_tags": True,
+        "exaggeration": False,
+        "languages": ("en",),
+    },
+    "nano": {
+        "public_id": "chatterbox-nano",
+        "voice_mode": "reference",
+        "sample_rate": ENGINE_SAMPLE_RATE,
+        "builtin_default": False,
+        "paralinguistic_tags": True,
+        "exaggeration": False,
+        "languages": ("en",),
+    },
+    "english": {
+        "public_id": "chatterbox",
+        "voice_mode": "builtin_or_reference",
+        "sample_rate": ENGINE_SAMPLE_RATE,
+        "builtin_default": True,
+        "paralinguistic_tags": False,
+        "exaggeration": True,
+        "languages": ("en",),
+    },
+    "multilingual": {
+        "public_id": "chatterbox-multilingual",
+        "voice_mode": "builtin_or_reference",
+        "sample_rate": ENGINE_SAMPLE_RATE,
+        "builtin_default": True,
+        "paralinguistic_tags": False,
+        "exaggeration": True,
+        "languages": MULTILINGUAL_LANGUAGES,
+    },
+}
 
 
-def is_checkpoint(path: Path) -> bool:
-    if not path.is_dir():
-        return False
-    if not (path / "config.json").is_file():
-        return False
-    return any((path / name).is_file() for name in WEIGHT_NAMES)
-
-
-def discover_checkpoints(root: Path, flat_id: str) -> list[tuple[str, Path]]:
-    if not root.is_dir():
-        return []
-    if is_checkpoint(root):
-        return [(flat_id, root)]
-    found: list[tuple[str, Path]] = []
-    for child in sorted(root.iterdir(), key=lambda p: p.name):
-        if not child.is_dir():
-            continue
-        if child.name.startswith(".") or child.name == "speech_tokenizer":
-            continue
-        if is_checkpoint(child):
-            found.append((child.name, child))
-    return found
+def parse_variant(raw: str) -> str:
+    value = (raw or "").strip().lower()
+    if not value:
+        return "turbo"
+    if value in ENGINE_VARIANTS:
+        return value
+    raise ValueError(f"TTS_VARIANT must be one of {sorted(ENGINE_VARIANTS)}; got {raw!r}")
 
 
 def parse_load_policy(raw: str) -> str:
     value = (raw or "").strip().lower()
     if not value:
         return "lazy"
-    if value in _ALLOWED_POLICIES:
+    if value == "all":
+        raise ValueError(
+            "TTS_LOAD_POLICY=all is not supported: Chatterbox loads one resident engine per process"
+        )
+    if value in {"lazy", "one"}:
         return value
-    raise ValueError(f"TTS_LOAD_POLICY must be one of {set(_ALLOWED_POLICIES)}; got {raw!r}")
+    raise ValueError(f"TTS_LOAD_POLICY must be one of {{'lazy', 'one'}}; got {raw!r}")
 
 
-def default_model_id(catalog_ids: list[str], requested: str) -> str:
-    requested = (requested or "").strip()
-    if requested and requested in catalog_ids:
-        return requested
-    return catalog_ids[0]
+def engine_metadata(variant: str) -> dict:
+    key = parse_variant(variant)
+    return dict(_VARIANT_META[key])
 
 
-def resolve_model_id(requested: str, catalog_ids: list[str], default_id: str) -> str | None:
-    requested = (requested or "").strip()
-    # tts-1 / qwen3-tts always mean the configured default, even if a folder uses that name.
-    if not requested or requested in {"tts-1", "qwen3-tts"}:
-        return default_id
-    if requested in catalog_ids:
-        return requested
-    return None
+def supports_builtin_default(variant: str) -> bool:
+    return bool(engine_metadata(variant)["builtin_default"])
 
 
 def is_public_model_request(requested: str, public_name: str) -> bool:
@@ -69,41 +115,6 @@ def is_public_model_request(requested: str, public_name: str) -> bool:
     if requested in PUBLIC_MODEL_ALIASES:
         return True
     return requested == (public_name or "").strip()
-
-
-def public_voice_id(model_id: str, speaker: str) -> str:
-    return f"{model_id}-{speaker}"
-
-
-def checkpoint_speakers(path: Path) -> list[str]:
-    """Speaker names from talker_config.spk_id. No weight load."""
-    cfg_path = path / "config.json"
-    if not cfg_path.is_file():
-        return []
-    try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    talker = data.get("talker_config") or {}
-    spk = talker.get("spk_id")
-    if isinstance(spk, dict):
-        return [str(name) for name in spk if str(name).strip()]
-    if isinstance(spk, list):
-        return [str(name) for name in spk if str(name).strip()]
-    return []
-
-
-def checkpoint_kind(path: Path) -> str:
-    """tts_model_type from config.json; missing/unreadable → custom_voice."""
-    cfg_path = path / "config.json"
-    if not cfg_path.is_file():
-        return "custom_voice"
-    try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return "custom_voice"
-    raw = data.get("tts_model_type") if isinstance(data, dict) else ""
-    return (raw or "").strip().lower() or "custom_voice"
 
 
 class VoiceOverlay(NamedTuple):
@@ -116,10 +127,7 @@ class VoiceOverlay(NamedTuple):
     ref_text: str
 
 
-def parse_voice_overlays(
-    data: object | None, env_speakers: str
-) -> list[VoiceOverlay]:
-    """Return overlays from voices.json + TTS_SPEAKERS."""
+def parse_voice_overlays(data: object | None, env_speakers: str) -> list[VoiceOverlay]:
     out: list[VoiceOverlay] = []
     if isinstance(data, dict):
         voices = data.get("voices", data)
@@ -193,7 +201,7 @@ def validate_voices_document(data: object) -> dict:
             raise ValueError("empty alias")
         if isinstance(spec, str):
             if not spec.strip():
-                raise ValueError(f"{key}: speaker must be a non-empty string")
+                raise ValueError(f"{key}: alias target must be a non-empty string")
             normalized[key] = spec
             continue
         if isinstance(spec, dict):
@@ -207,13 +215,14 @@ def validate_voices_document(data: object) -> dict:
                 text_raw = spec.get("ref_text")
                 if not isinstance(audio_raw, str) or not audio_raw.strip():
                     raise ValueError(f"{key}: clone requires ref_audio")
-                if not isinstance(text_raw, str) or not text_raw.strip():
-                    raise ValueError(f"{key}: clone requires ref_text")
+                if text_raw is not None and not isinstance(text_raw, str):
+                    raise ValueError(f"{key}: ref_text must be a string")
                 entry: dict[str, str] = {
                     "kind": "voice_clone",
                     "ref_audio": audio_raw.strip(),
-                    "ref_text": text_raw.strip(),
                 }
+                if isinstance(text_raw, str) and text_raw.strip():
+                    entry["ref_text"] = text_raw.strip()
                 speaker = spec.get("speaker")
                 if isinstance(speaker, str) and speaker.strip():
                     entry["speaker"] = speaker
@@ -221,8 +230,11 @@ def validate_voices_document(data: object) -> dict:
                 if model is not None:
                     if not isinstance(model, str):
                         raise ValueError(f"{key}: model must be a string")
-                    if model.strip():
-                        entry["model"] = model
+                    stripped_model = model.strip()
+                    if stripped_model:
+                        if stripped_model not in ENGINE_VARIANTS and stripped_model not in PUBLIC_MODEL_ALIASES:
+                            raise ValueError(f"{key}: model must be a Chatterbox variant or tts-1")
+                        entry["model"] = stripped_model
                 if "instructions" in spec:
                     instructions = spec.get("instructions")
                     if not isinstance(instructions, str):
@@ -267,58 +279,6 @@ def write_voices_document(path: Path, document: dict) -> None:
         raise
 
 
-def _owners_for_speaker(index: dict[str, tuple[str, str]], speaker: str) -> list[str]:
-    wanted = speaker.strip().lower()
-    seen: list[str] = []
-    for mid, real in index.values():
-        if real.lower() == wanted and mid not in seen:
-            seen.append(mid)
-    return seen
-
-
-def resolve_overlay_target(
-    speaker: str,
-    model_hint: str | None,
-    index: dict[str, tuple[str, str]],
-    catalog_ids: list[str],
-    default_id: str,
-) -> tuple[str, str] | None:
-    """Map overlay Maps-to to an existing (model_id, real_speaker), or None."""
-    del default_id
-    key = (speaker or "").strip().lower()
-    if not key:
-        return None
-    if key in index:
-        return index[key]
-    stripped = speaker.strip()
-    if model_hint and model_hint in catalog_ids:
-        pub = public_voice_id(model_hint, stripped).lower()
-        if pub in index:
-            return index[pub]
-        owners = _owners_for_speaker(index, stripped)
-        if model_hint in owners or not owners:
-            if pub in index:
-                return index[pub]
-        if owners == [model_hint]:
-            return (model_hint, stripped)
-    owners = _owners_for_speaker(index, stripped)
-    if len(owners) == 1:
-        return (owners[0], stripped)
-    return None
-
-
-def merge_instructions(preset: str | None, extra: str | None) -> str | None:
-    a = (preset or "").strip()
-    b = (extra or "").strip()
-    if a and b:
-        return f"{a} {b}"
-    if a:
-        return a
-    if b:
-        return b
-    return None
-
-
 def overlay_instructions(name: str, overlays: list[VoiceOverlay]) -> str:
     key = (name or "").strip().lower()
     preset = ""
@@ -346,194 +306,75 @@ def overlay_clone_ref(name: str, overlays: list[VoiceOverlay]) -> tuple[str, str
     return ref
 
 
-def build_voice_index(
-    catalog: list[tuple[str, Path]],
-    overlays: list[VoiceOverlay],
-    default_id: str,
-) -> dict[str, tuple[str, str]]:
-    """Map lowercased public voice id -> (checkpoint id, speaker). Canonical id is `{model}-{speaker}`."""
-    index: dict[str, tuple[str, str]] = {}
-    ids = [i for i, _ in catalog]
-    for model_id, path in catalog:
-        names = checkpoint_speakers(path)
-        if not names:
-            names = [] if checkpoint_kind(path) == "base" else [model_id]
-        for name in names:
-            index[public_voice_id(model_id, name).lower()] = (model_id, name)
-    pairs = _unique_pairs(index)
-    speaker_counts = _speaker_counts(pairs)
-    for mid, name in pairs:
-        if mid.lower() == name.lower() and speaker_counts[name.lower()] == 1:
-            index.setdefault(name.lower(), (mid, name))
+def path_under(path: Path, root: Path) -> bool:
+    try:
+        return path.is_relative_to(root)
+    except AttributeError:
+        try:
+            return os.path.commonpath([str(path), str(root)]) == str(root)
+        except ValueError:
+            return False
+
+
+def resolve_reference_wav(rel: str, config_dir: Path) -> Path | None:
+    rel = (rel or "").strip()
+    if not rel:
+        return None
+    candidate = Path(rel)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return None
+    root = config_dir.resolve()
+    path = (config_dir / rel).resolve()
+    if not path.is_file() or path.suffix.lower() != ".wav":
+        return None
+    if not path_under(path, root):
+        return None
+    return path
+
+
+def listed_voice_names(overlays: list[VoiceOverlay], variant: str) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    if supports_builtin_default(variant):
+        names.append(BUILTIN_DEFAULT_VOICE)
+        seen.add(BUILTIN_DEFAULT_VOICE)
     for item in overlays:
-        if item.kind == "voice_clone":
-            bases = [i for i, p in catalog if checkpoint_kind(p) == "base"]
-            mid = item.model if item.model in bases else (bases[0] if len(bases) == 1 else None)
-            if mid is None:
-                continue
-            if item.alias.strip():
-                index[item.alias.strip().lower()] = (mid, item.alias.strip())
+        alias = item.alias.strip()
+        if not alias:
             continue
-        resolved = resolve_overlay_target(item.speaker, item.model, index, ids, default_id)
-        if resolved is None:
+        key = alias.lower()
+        if key in seen:
             continue
-        mid, real = resolved
-        if item.alias.strip():
-            index[item.alias.strip().lower()] = (mid, real)
-    return index
+        seen.add(key)
+        names.append(alias)
+    return names
 
 
-def _unique_pairs(index: dict[str, tuple[str, str]]) -> list[tuple[str, str]]:
-    seen: set[tuple[str, str]] = set()
-    out: list[tuple[str, str]] = []
-    for pair in index.values():
-        if pair not in seen:
-            seen.add(pair)
-            out.append(pair)
-    return out
-
-
-def _speaker_counts(pairs: list[tuple[str, str]]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for _mid, speaker in pairs:
-        key = speaker.lower()
-        counts[key] = counts.get(key, 0) + 1
-    return counts
-
-
-def _aliases_by_pair(
-    index: dict[str, tuple[str, str]],
-    overlays: list[VoiceOverlay] | None,
-) -> dict[tuple[str, str], list[str]]:
-    grouped: dict[tuple[str, str], list[str]] = {}
-    if not overlays:
-        return grouped
-    for item in overlays:
-        name = item.alias.strip()
-        if not name:
-            continue
-        pair = index.get(name.lower())
-        if pair is None:
-            continue
-        names = grouped.setdefault(pair, [])
-        if name not in names:
-            names.append(name)
-    return grouped
-
-
-def _listed_name_for_pair(
-    mid: str,
-    speaker: str,
-    listed: list[str],
-    index: dict[str, tuple[str, str]],
-) -> str:
-    pair = (mid, speaker)
-    for name in listed:
-        if name.lower() in index and index[name.lower()] == pair:
-            return name
-    return public_voice_id(mid, speaker)
-
-
-def public_voice_names(
-    index: dict[str, tuple[str, str]],
-    overlays: list[VoiceOverlay] | None = None,
-    catalog: list[tuple[str, Path]] | None = None,
-) -> list[str]:
-    pairs = _unique_pairs(index)
-    speaker_counts = _speaker_counts(pairs)
-    aliases = _aliases_by_pair(index, overlays)
-    kind_by_mid = {mid: checkpoint_kind(path) for mid, path in catalog} if catalog is not None else {}
-    labels: dict[str, str] = {}
-    for mid, speaker in pairs:
-        pair = (mid, speaker)
-        if (
-            catalog is not None
-            and kind_by_mid.get(mid) == "base"
-            and speaker.lower() == mid.lower()
-            and pair not in aliases
-        ):
-            continue
-        names = aliases.get(pair)
-        if names:
-            for name in names:
-                labels[name.lower()] = name
-            continue
-        if mid.lower() == speaker.lower() and speaker_counts[speaker.lower()] == 1:
-            labels[speaker.lower()] = speaker
-            continue
-        pub = public_voice_id(mid, speaker)
-        labels[pub.lower()] = pub
-    return sorted(labels.values(), key=str.lower)
-
-
-def public_default_voice(
-    index: dict[str, tuple[str, str]],
-    requested: str,
-    catalog_ids: list[str],
-    overlays: list[VoiceOverlay] | None = None,
-) -> str:
-    listed = public_voice_names(index, overlays)
+def public_default_voice(overlays: list[VoiceOverlay], requested: str, variant: str) -> str:
+    listed = listed_voice_names(overlays, variant)
     if not listed:
         return ""
     requested = (requested or "").strip()
-    listed_by_key = {name.lower(): name for name in listed}
-    if requested:
-        key = requested.lower()
-        if key in listed_by_key:
-            return listed_by_key[key]
-        if key in index:
-            mid, speaker = index[key]
-            return _listed_name_for_pair(mid, speaker, listed, index)
-        owners = _owners_for_speaker(index, requested)
-        if len(owners) == 1:
-            return _listed_name_for_pair(owners[0], requested, listed, index)
-    for mid in catalog_ids:
-        for name in listed:
-            if name.lower() in index and index[name.lower()][0] == mid:
-                return name
+    by_key = {name.lower(): name for name in listed}
+    if requested and requested.lower() in by_key:
+        return by_key[requested.lower()]
     return listed[0]
 
 
 def resolve_voice_route(
     name: str | None,
-    index: dict[str, tuple[str, str]],
+    overlays: list[VoiceOverlay],
     default_voice: str,
     stock_voices: set[str] | frozenset[str],
-    speaker_key,
-) -> tuple[str, str, bool, str]:
-    """Return (model_id, speaker, fell_back, reason) for a public `{model}-{voice}` name."""
-    if not index:
-        return "", default_voice, True, "no voices"
+    variant: str,
+) -> tuple[str, bool, str]:
+    listed = {n.lower(): n for n in listed_voice_names(overlays, variant)}
     default_key = (default_voice or "").strip().lower()
-    if default_key in index:
-        default_mid, default_spk = index[default_key]
-    else:
-        default_mid, default_spk = next(iter(index.values()))
+    default_name = listed.get(default_key, default_voice)
     key = (name or "").strip().lower()
     if not key or key in stock_voices:
         reason = "empty voice" if not key else f"openai stock voice {key}"
-        return default_mid, default_spk, bool(key), reason
-    if key in index:
-        mid, speaker = index[key]
-        return mid, speaker, False, ""
-    owners = _owners_for_speaker(index, key)
-    if len(owners) == 1:
-        return owners[0], key, False, ""
-    wanted = speaker_key(key)
-    matches: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for alias, (mid, speaker) in index.items():
-        pub = public_voice_id(mid, speaker)
-        if (
-            speaker_key(alias) == wanted
-            or speaker_key(pub) == wanted
-            or speaker_key(speaker) == wanted
-        ):
-            pair = (mid, speaker)
-            if pair not in seen:
-                matches.append(pair)
-                seen.add(pair)
-    if len(matches) == 1:
-        mid, speaker = matches[0]
-        return mid, speaker, False, ""
-    return default_mid, default_spk, True, f"unknown voice {name!r}; using {default_voice or default_spk}"
+        return default_name, bool(key), reason
+    if key in listed:
+        return listed[key], False, ""
+    return default_name, True, f"unknown voice {name!r}; using {default_voice}"

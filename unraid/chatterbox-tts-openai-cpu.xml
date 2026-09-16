@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>chatterbox-tts-openai-cpu</Name>
+  <Repository>ghcr.io/doguitar/chatterbox-tts-openai:cpu</Repository>
+  <Registry>https://github.com/users/doguitar/packages/container/package/chatterbox-tts-openai</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/doguitar/chatterbox-tts-openai/issues</Support>
+  <Project>https://github.com/doguitar/chatterbox-tts-openai</Project>
+  <Overview>OpenAI-compatible TTS for Chatterbox on CPU. Default engine is Chatterbox-Turbo. Voice identities are reference WAV presets in /config. NVIDIA: use chatterbox-tts-openai.xml (:cuda).</Overview>
+  <Category>AI: HomeAutomation:</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/doguitar/chatterbox-tts-openai/main/unraid/chatterbox-tts-openai-cpu.xml</TemplateURL>
+  <Icon>https://avatars.githubusercontent.com/u/1200188?v=4</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Unraid 6.12+. CPU-only image. GHCR packages start private: docker login ghcr.io, or set the package public. Put voices.json and clones/*.wav under the config path.</Requires>
+  <Config Name="API Port" Target="8080" Default="8080" Mode="tcp" Description="OpenAI /v1/audio/speech listen port" Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Config" Target="/config" Default="/mnt/user/appdata/chatterbox-tts-openai/config" Mode="rw" Description="voices.json and clones/*.wav" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/chatterbox-tts-openai/config</Config>
+  <Config Name="TTS_DEVICE" Target="TTS_DEVICE" Default="cpu" Mode="" Description="Inference device" Type="Variable" Display="always" Required="false" Mask="false">cpu</Config>
+  <Config Name="TTS_VARIANT" Target="TTS_VARIANT" Default="turbo" Mode="" Description="turbo, nano, english, or multilingual" Type="Variable" Display="always" Required="false" Mask="false">turbo</Config>
+  <Config Name="TTS_VOICES" Target="TTS_VOICES" Default="/config/voices.json" Mode="" Description="Voice preset file" Type="Variable" Display="advanced" Required="false" Mask="false">/config/voices.json</Config>
+  <Config Name="TTS_MODEL_NAME" Target="TTS_MODEL_NAME" Default="tts-1" Mode="" Description="Public OpenAI model id" Type="Variable" Display="advanced" Required="false" Mask="false">tts-1</Config>
+  <Config Name="TTS_LANGUAGE" Target="TTS_LANGUAGE" Default="en" Mode="" Description="Default language id for multilingual" Type="Variable" Display="advanced" Required="false" Mask="false">en</Config>
+  <Config Name="TTS_LOAD_POLICY" Target="TTS_LOAD_POLICY" Default="lazy" Mode="" Description="lazy or one" Type="Variable" Display="advanced" Required="false" Mask="false">lazy</Config>
+</Container>

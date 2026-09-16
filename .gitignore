@@ -8,3 +8,7 @@ config/
 *.pt
 *.safetensors
 .DS_Store
+
+_smoke_config/
+_hf_cache/
+_smoke_out.wav

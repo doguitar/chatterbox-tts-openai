@@ -64,58 +64,6 @@ class LoadVoicesDocumentTests(unittest.TestCase):
 
 
 class ValidateVoicesDocumentTests(unittest.TestCase):
-    def test_accepts_string_and_object(self):
-        out = validate_voices_document(
-            {
-                "voices": {
-                    "alice": "alice",
-                    "nick": {"speaker": "bob", "model": "alpha"},
-                }
-            }
-        )
-        self.assertEqual(
-            out,
-            {
-                "voices": {
-                    "alice": "alice",
-                    "nick": {"speaker": "bob", "model": "alpha"},
-                }
-            },
-        )
-
-    def test_rejects_list_value(self):
-        with self.assertRaises(ValueError) as ctx:
-            validate_voices_document({"alice": ["x"]})
-        self.assertIn("alice", str(ctx.exception))
-
-    def test_rejects_empty_alias(self):
-        with self.assertRaises(ValueError) as ctx:
-            validate_voices_document({"": "alice"})
-        self.assertIn("empty alias", str(ctx.exception))
-
-    def test_strips_instructions(self):
-        out = validate_voices_document(
-            {"voices": {"n": {"speaker": "alice", "instructions": "  Male 40s  "}}}
-        )
-        self.assertEqual(out["voices"]["n"]["instructions"], "Male 40s")
-
-    def test_accepts_public_id_string(self):
-        out = validate_voices_document({"voices": {"mustaine": "mustaine-mustaine"}})
-        self.assertEqual(out["voices"]["mustaine"], "mustaine-mustaine")
-
-    def test_rejects_non_string_instructions(self):
-        with self.assertRaises(ValueError) as ctx:
-            validate_voices_document(
-                {"voices": {"n": {"speaker": "alice", "instructions": 1}}}
-            )
-        self.assertIn("instructions must be a string", str(ctx.exception))
-
-    def test_omits_blank_instructions(self):
-        out = validate_voices_document(
-            {"voices": {"n": {"speaker": "alice", "instructions": "  "}}}
-        )
-        self.assertNotIn("instructions", out["voices"]["n"])
-
     def test_accepts_clone_object(self):
         out = validate_voices_document(
             {
@@ -137,12 +85,7 @@ class ValidateVoicesDocumentTests(unittest.TestCase):
             },
         )
 
-    def test_rejects_clone_missing_fields(self):
-        with self.assertRaises(ValueError) as ctx:
-            validate_voices_document(
-                {"voices": {"jane": {"kind": "voice_clone", "ref_audio": "clones/jane.wav"}}}
-            )
-        self.assertIn("clone requires ref_text", str(ctx.exception))
+    def test_rejects_clone_missing_ref_audio(self):
         with self.assertRaises(ValueError) as ctx:
             validate_voices_document(
                 {"voices": {"jane": {"kind": "voice_clone", "ref_text": "Hello."}}}
@@ -154,22 +97,35 @@ class ValidateVoicesDocumentTests(unittest.TestCase):
             validate_voices_document({"voices": {"n": {"kind": "nope", "speaker": "alice"}}})
         self.assertIn("unknown kind", str(ctx.exception))
 
+    def test_rejects_empty_alias(self):
+        with self.assertRaises(ValueError) as ctx:
+            validate_voices_document({"": {"kind": "voice_clone", "ref_audio": "a.wav"}})
+        self.assertIn("empty alias", str(ctx.exception))
+
+    def test_strips_instructions_metadata(self):
+        out = validate_voices_document(
+            {
+                "voices": {
+                    "n": {
+                        "kind": "voice_clone",
+                        "ref_audio": "clones/n.wav",
+                        "instructions": "  warm  ",
+                    }
+                }
+            }
+        )
+        self.assertEqual(out["voices"]["n"]["instructions"], "warm")
+
 
 class WriteVoicesDocumentTests(unittest.TestCase):
     def test_round_trip(self):
         payload = {
             "voices": {
-                "alice": "alice",
-                "nick": {"speaker": "bob", "model": "alpha"},
-                "narrator": {
-                    "speaker": "alpha-alice",
-                    "instructions": "Male 40s",
-                },
                 "jane": {
                     "kind": "voice_clone",
                     "ref_audio": "clones/jane.wav",
                     "ref_text": "Hello there.",
-                },
+                }
             }
         }
         with tempfile.TemporaryDirectory() as raw:
