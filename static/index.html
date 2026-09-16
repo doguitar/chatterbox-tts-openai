@@ -34,6 +34,7 @@
     <label for="voice">Voice</label>
     <div class="row">
       <select id="voice"></select>
+      <button type="button" id="rescan">Rescan models</button>
     </div>
     <label for="text">Text</label>
     <textarea id="text" required></textarea>
@@ -68,6 +69,22 @@
 
     fetch("/v1/voices").then((r) => r.json()).then(fillVoices).catch((err) => {
       statusEl.textContent = String(err);
+    });
+    document.getElementById("rescan").addEventListener("click", async () => {
+      statusEl.textContent = "rescanning…";
+      try {
+        const res = await fetch("/ui/rescan", { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          statusEl.textContent = data.detail || ("http " + res.status);
+          return;
+        }
+        const voices = await fetch("/v1/voices").then((r) => r.json());
+        fillVoices(voices);
+        statusEl.textContent = "packs: " + ((data.models || []).map((m) => m.id).join(", ") || "none");
+      } catch (err) {
+        statusEl.textContent = String(err);
+      }
     });
 
     generateBtn.addEventListener("click", async () => {

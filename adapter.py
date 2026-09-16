@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -64,10 +65,60 @@ def call_generate(
     return tensor_to_float32_1d(wav), sr
 
 
+def is_turbo_pack(path: Path) -> bool:
+    return path.is_dir() and (path / "pack.json").is_file()
+
+
+def is_official_local_ckpt(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    return any(
+        (path / name).is_file()
+        for name in (
+            "ve.safetensors",
+            "t3_cfg.safetensors",
+            "s3gen.safetensors",
+            "t3_turbo_v1.safetensors",
+            "s3gen.pt",
+            "ve.pt",
+        )
+    )
+
+
+def load_turbo_pack(pack_dir: Path, device: str):
+    from safetensors.torch import load_file
+    from transformers import AutoTokenizer
+    from chatterbox.tts_turbo import ChatterboxTurboTTS
+
+    pack_dir = Path(pack_dir)
+    pack = json.loads((pack_dir / "pack.json").read_text(encoding="utf-8"))
+    engine = ChatterboxTurboTTS.from_pretrained(device=device, nano=False)
+    merged_name = str(pack.get("merged") or "t3_turbo_finetuned_merged.safetensors")
+    merged = pack_dir / merged_name
+    if not merged.is_file():
+        raise FileNotFoundError(f"pack merged weights missing: {merged}")
+    state = load_file(str(merged))
+    if "model" in state:
+        inner = state["model"]
+        state = inner[0] if isinstance(inner, (list, tuple)) else inner
+    engine.t3.load_state_dict(state, strict=False)
+    tfmr = getattr(engine.t3, "tfmr", None)
+    if tfmr is not None and hasattr(tfmr, "wte"):
+        del tfmr.wte
+    tok = pack_dir / str(pack.get("tokenizer") or "tokenizer")
+    if tok.is_dir():
+        engine.tokenizer = AutoTokenizer.from_pretrained(str(tok))
+        if engine.tokenizer.pad_token is None:
+            engine.tokenizer.pad_token = engine.tokenizer.eos_token
+    return engine
+
+
 def load_engine(variant: str, device: str, model_path: str = "", t3_model: str = "v3"):
     variant = parse_variant(variant)
     local = Path(model_path) if (model_path or "").strip() else None
-    use_local = bool(local and local.is_dir())
+    if local and is_turbo_pack(local):
+        return load_turbo_pack(local, device)
+    use_local = bool(local and is_official_local_ckpt(local))
     if variant in {"turbo", "nano"}:
         from chatterbox.tts_turbo import ChatterboxTurboTTS
 

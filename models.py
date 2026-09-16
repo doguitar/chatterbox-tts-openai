@@ -77,6 +77,98 @@ _VARIANT_META = {
 }
 
 
+def load_pack_document(path: Path) -> dict | None:
+    pack_path = path / "pack.json"
+    if not pack_path.is_file():
+        return None
+    try:
+        data = json.loads(pack_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def discover_packs(root: Path) -> list[tuple[str, Path, dict]]:
+    """Find Chatterbox train packs (pack.json) under root or at root itself."""
+    if not root.is_dir():
+        return []
+    found: list[tuple[str, Path, dict]] = []
+    own = load_pack_document(root)
+    if own is not None:
+        alias = str(own.get("name") or root.name).strip() or root.name
+        return [(alias, root, own)]
+    for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        data = load_pack_document(child)
+        if data is None:
+            continue
+        alias = str(data.get("name") or child.name).strip() or child.name
+        found.append((alias, child, data))
+    return found
+
+
+def pack_voice_overlays(packs: list[tuple[str, Path, dict]]) -> list[VoiceOverlay]:
+    out: list[VoiceOverlay] = []
+    for alias, path, data in packs:
+        ref = str(data.get("reference") or "reference.wav").strip() or "reference.wav"
+        rel = f"{path.name}/{ref}".replace("\\", "/")
+        out.append(VoiceOverlay(alias, "", alias, "", "voice_clone", rel, ""))
+    return out
+
+
+PRETRAINED_ENGINE_KEY = "__pretrained__"
+
+
+def resolve_pack_for_voice(
+    name: str,
+    overlays: list[VoiceOverlay],
+    catalog: list[tuple[str, Path, dict]],
+) -> tuple[str, Path, dict] | None:
+    """Map a public voice to a train pack, or None for the stock pretrained engine."""
+    by_alias = {alias.lower(): (alias, path, data) for alias, path, data in catalog}
+    by_folder = {path.name.lower(): (alias, path, data) for alias, path, data in catalog}
+    key = (name or "").strip().lower()
+    if key in by_alias:
+        return by_alias[key]
+    if key in by_folder:
+        return by_folder[key]
+    for item in overlays:
+        if item.alias.strip().lower() != key:
+            continue
+        hint = (item.model or "").strip().lower()
+        if hint in by_alias:
+            return by_alias[hint]
+        if hint in by_folder:
+            return by_folder[hint]
+    return None
+
+
+def engine_cache_key(pack: tuple[str, Path, dict] | None) -> str:
+    return pack[0] if pack is not None else PRETRAINED_ENGINE_KEY
+
+
+def lru_touch(order: list[str], key: str) -> list[str]:
+    return [item for item in order if item != key] + [key]
+
+
+def lru_victim(order: list[str], keep: str) -> str | None:
+    for item in order:
+        if item != keep:
+            return item
+    return None
+
+
+def is_memory_full_error(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    if "outofmemory" in name:
+        return True
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cuda oom" in msg
+
+
 def parse_variant(raw: str) -> str:
     value = (raw or "").strip().lower()
     if not value:
@@ -90,13 +182,9 @@ def parse_load_policy(raw: str) -> str:
     value = (raw or "").strip().lower()
     if not value:
         return "lazy"
-    if value == "all":
-        raise ValueError(
-            "TTS_LOAD_POLICY=all is not supported: Chatterbox loads one resident engine per process"
-        )
-    if value in {"lazy", "one"}:
+    if value in {"lazy", "one", "all"}:
         return value
-    raise ValueError(f"TTS_LOAD_POLICY must be one of {{'lazy', 'one'}}; got {raw!r}")
+    raise ValueError(f"TTS_LOAD_POLICY must be one of {{'lazy', 'one', 'all'}}; got {raw!r}")
 
 
 def engine_metadata(variant: str) -> dict:
@@ -316,20 +404,23 @@ def path_under(path: Path, root: Path) -> bool:
             return False
 
 
-def resolve_reference_wav(rel: str, config_dir: Path) -> Path | None:
+def resolve_reference_wav(rel: str, *roots: Path) -> Path | None:
     rel = (rel or "").strip()
     if not rel:
         return None
     candidate = Path(rel)
     if candidate.is_absolute() or ".." in candidate.parts:
         return None
-    root = config_dir.resolve()
-    path = (config_dir / rel).resolve()
-    if not path.is_file() or path.suffix.lower() != ".wav":
-        return None
-    if not path_under(path, root):
-        return None
-    return path
+    for root in roots:
+        if not root:
+            continue
+        base = root.resolve()
+        path = (root / rel).resolve()
+        if not path.is_file() or path.suffix.lower() != ".wav":
+            continue
+        if path_under(path, base):
+            return path
+    return None
 
 
 def listed_voice_names(overlays: list[VoiceOverlay], variant: str) -> list[str]:

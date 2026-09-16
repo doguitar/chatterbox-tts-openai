@@ -6,22 +6,31 @@ from pathlib import Path
 
 from models import (
     ENGINE_VARIANTS,
+    PRETRAINED_ENGINE_KEY,
     VoiceOverlay,
+    discover_packs,
+    engine_cache_key,
     engine_metadata,
+    is_memory_full_error,
     is_public_model_request,
     listed_voice_names,
+    lru_touch,
+    lru_victim,
     overlay_clone_ref,
     overlay_instructions,
     overlay_kind,
+    pack_voice_overlays,
     parse_load_policy,
     parse_variant,
     parse_voice_overlays,
     public_default_voice,
+    resolve_pack_for_voice,
     resolve_reference_wav,
     resolve_voice_route,
     supports_builtin_default,
     validate_voices_document,
 )
+
 
 
 class ParseVariantTests(unittest.TestCase):
@@ -44,10 +53,8 @@ class ParseLoadPolicyTests(unittest.TestCase):
         self.assertEqual(parse_load_policy(""), "lazy")
         self.assertEqual(parse_load_policy(" One "), "one")
 
-    def test_all_rejected(self):
-        with self.assertRaises(ValueError) as ctx:
-            parse_load_policy("all")
-        self.assertIn("one resident engine", str(ctx.exception))
+    def test_all_accepted(self):
+        self.assertEqual(parse_load_policy("all"), "all")
 
     def test_unknown_raises(self):
         with self.assertRaises(ValueError) as ctx:
@@ -193,6 +200,56 @@ class ValidateCloneTests(unittest.TestCase):
         )
         self.assertEqual(out["voices"]["jane"]["kind"], "voice_clone")
         self.assertNotIn("ref_text", out["voices"]["jane"])
+
+
+class DiscoverPacksTests(unittest.TestCase):
+    def test_nested_pack_and_voice_overlay(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            pack = root / "GOOD-en-serling-turbo-v2-e50"
+            pack.mkdir()
+            (pack / "pack.json").write_text(
+                json.dumps(
+                    {
+                        "name": "serling",
+                        "model": "turbo-lora",
+                        "reference": "reference.wav",
+                        "engine": "chatterbox-turbo",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (pack / "reference.wav").write_bytes(b"RIFF....WAVE")
+            found = discover_packs(root)
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0][0], "serling")
+            overlays = pack_voice_overlays(found)
+            self.assertEqual(overlays[0].alias, "serling")
+            self.assertEqual(overlays[0].model, "serling")
+            self.assertEqual(overlays[0].kind, "voice_clone")
+            wav = resolve_reference_wav(overlays[0].ref_audio, root)
+            self.assertEqual(wav, (pack / "reference.wav").resolve())
+            jane = VoiceOverlay("jane", "", None, "", "voice_clone", "clones/jane.wav", "")
+            self.assertEqual(resolve_pack_for_voice("serling", overlays, found)[0], "serling")
+            self.assertIsNone(resolve_pack_for_voice("jane", [jane], found))
+            self.assertEqual(engine_cache_key(None), PRETRAINED_ENGINE_KEY)
+
+    def test_missing_root(self):
+        self.assertEqual(discover_packs(Path("/no/such/models-dir")), [])
+
+
+class EngineCacheHelperTests(unittest.TestCase):
+    def test_lru_evicts_oldest_other(self):
+        order = lru_touch([], "a")
+        order = lru_touch(order, "b")
+        order = lru_touch(order, "a")
+        self.assertEqual(order, ["b", "a"])
+        self.assertEqual(lru_victim(order, "a"), "b")
+        self.assertIsNone(lru_victim(["a"], "a"))
+
+    def test_memory_full_error(self):
+        self.assertTrue(is_memory_full_error(RuntimeError("CUDA out of memory")))
+        self.assertFalse(is_memory_full_error(RuntimeError("missing weights")))
 
 
 if __name__ == "__main__":

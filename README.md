@@ -60,13 +60,13 @@ One-shot clone: `multipart/form-data` with `input`, `voice`, `ref_text`, and `re
 | --- | --- | --- |
 | `TTS_VARIANT` | `turbo` | `turbo` `nano` `english` `multilingual` |
 | `TTS_DEVICE` | auto `cuda:0` → `mps` → `cpu` | explicit torch device |
-| `TTS_MODEL` | empty | local dir for `from_local`; else official `from_pretrained` |
+| `TTS_MODEL` | `/models` | pack root (bind-mount this); `from_local` or Turbo LoRA `pack.json` |
 | `TTS_T3_MODEL` | `v3` | multilingual T3 (`v2` or `v3`) |
 | `TTS_VOICES` | `/config/voices.json` | presets |
 | `TTS_MODEL_NAME` | `tts-1` | public `/v1/models` id |
 | `TTS_LANGUAGE` | `en` | default `language_id` |
 | `TTS_DEFAULT_VOICE` | first listed | default alias |
-| `TTS_LOAD_POLICY` | `lazy` | `lazy` (load on first request) or `one` (load at startup). `all` is rejected |
+| `TTS_LOAD_POLICY` | `lazy` | `lazy` keeps every pack loaded on first use; `one` unloads the previous pack on switch; `all` preloads every pack. On CUDA/CPU OOM while loading, the least-recent pack is unloaded and the load is retried |
 | `TTS_EXAGGERATION` | unset | english/multilingual `exaggeration` |
 | `TTS_CFG_WEIGHT` | unset | english/multilingual `cfg_weight` |
 | `TTS_HOST` / `TTS_PORT` | `0.0.0.0` / `8080` | bind |
@@ -80,8 +80,11 @@ docker build --build-arg TORCH_BACKEND=cuda -t chatterbox-tts-openai:cuda .
 docker run --rm -p 8080:8080 \
   -e TTS_VARIANT=turbo \
   -v "$PWD/config:/config" \
+  -v /path/to/chatterbox-packs:/models \
   chatterbox-tts-openai:cpu
 ```
+
+Drop a pack directory with `pack.json` under the host models folder (for example `GOOD-en-serling-turbo-v2-e50`), then `POST /ui/rescan` or use **Rescan models** in the UI. Do not copy packs into a running container; `/models` is the bind mount.
 
 CUDA:
 
@@ -90,6 +93,7 @@ docker run --rm --gpus all -p 8080:8080 \
   -e TTS_DEVICE=cuda:0 \
   -e TTS_VARIANT=turbo \
   -v "$PWD/config:/config" \
+  -v /path/to/chatterbox-packs:/models \
   ghcr.io/doguitar/chatterbox-tts-openai:cuda
 ```
 

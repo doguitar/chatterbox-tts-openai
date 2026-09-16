@@ -46,11 +46,14 @@ ENV TTS_HOST=0.0.0.0 \
     TTS_VOICES=/config/voices.json \
     TTS_LANGUAGE=en \
     TTS_MODEL_NAME=tts-1 \
-    TTS_VARIANT=turbo
+    TTS_VARIANT=turbo \
+    TTS_MODEL=/models
 
 COPY server.py device.py models.py adapter.py voices.example.json /app/
 COPY static /app/static
 
+RUN mkdir -p /models
+
 EXPOSE 8080
-VOLUME ["/config"]
+VOLUME ["/config", "/models"]
 CMD ["python3", "/app/server.py"]

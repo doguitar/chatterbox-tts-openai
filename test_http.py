@@ -64,7 +64,9 @@ class SpeechHttpTests(unittest.TestCase):
             server_mod.CLONES_DIR = self.root / "clones"
             server_mod.VARIANT = variant
             server_mod._rebuild_voices()
-            server_mod.engine = fake
+            server_mod.loaded = {server_mod.PRETRAINED_ENGINE_KEY: fake}
+            server_mod.lru_order = [server_mod.PRETRAINED_ENGINE_KEY]
+            server_mod.engine_variant_by = {server_mod.PRETRAINED_ENGINE_KEY: variant}
             from fastapi.testclient import TestClient
 
             return TestClient(server_mod.app), fake, server_mod
@@ -172,6 +174,90 @@ class SpeechHttpTests(unittest.TestCase):
             files={"ref_audio": ("ref.wav", self.wav.read_bytes(), "audio/wav")},
         )
         self.assertEqual(res.status_code, 400)
+
+
+
+    def _pack(self, root, name, folder):
+        pack = root / folder
+        pack.mkdir()
+        (pack / "pack.json").write_text(
+            json.dumps({"name": name, "model": "turbo-lora", "reference": "reference.wav"}),
+            encoding="utf-8",
+        )
+        (pack / "reference.wav").write_bytes(b"RIFF....WAVE")
+        return pack
+
+    def _client_with_packs(self, policy="lazy"):
+        models = self.root / "models"
+        models.mkdir()
+        self._pack(models, "serling", "GOOD-en-serling")
+        self._pack(models, "orwell", "GOOD-en-orwell")
+        self.env["TTS_MODEL"] = str(models)
+        self.env["TTS_LOAD_POLICY"] = policy
+        engines = []
+
+        def fake_load(variant, device, model_path="", t3_model="v3"):
+            eng = FakeEngine()
+            eng.model_path = model_path
+            engines.append(eng)
+            if getattr(self, "_oom_once", False):
+                self._oom_once = False
+                raise RuntimeError("CUDA out of memory")
+            return eng
+
+        with patch.dict("os.environ", self.env, clear=False):
+            import importlib
+            import server as server_mod
+
+            importlib.reload(server_mod)
+            server_mod.VOICES_PATH = self.root / "voices.json"
+            server_mod.CLONES_DIR = self.root / "clones"
+            server_mod.MODEL_PATH = str(models)
+            server_mod.LOAD_POLICY = policy
+            server_mod._rescan_catalog(unload=False)
+            server_mod.load_engine = fake_load
+            from fastapi.testclient import TestClient
+
+            return TestClient(server_mod.app), server_mod, engines
+
+    def test_lazy_keeps_two_packs(self):
+        client, server_mod, engines = self._client_with_packs("lazy")
+        for voice in ("serling", "orwell"):
+            res = client.post(
+                "/v1/audio/speech",
+                json={"model": "tts-1", "voice": voice, "input": "Hi", "response_format": "wav"},
+            )
+            self.assertEqual(res.status_code, 200, res.text)
+            self.assertEqual(res.headers.get("x-tts-model"), voice)
+        self.assertEqual(set(server_mod.loaded), {"serling", "orwell"})
+        self.assertEqual(len(engines), 2)
+
+    def test_one_unloads_previous_pack(self):
+        client, server_mod, _engines = self._client_with_packs("one")
+        client.post(
+            "/v1/audio/speech",
+            json={"model": "tts-1", "voice": "serling", "input": "Hi", "response_format": "wav"},
+        )
+        client.post(
+            "/v1/audio/speech",
+            json={"model": "tts-1", "voice": "orwell", "input": "Hi", "response_format": "wav"},
+        )
+        self.assertEqual(list(server_mod.loaded), ["orwell"])
+
+    def test_memory_full_unloads_lru(self):
+        client, server_mod, _engines = self._client_with_packs("lazy")
+        client.post(
+            "/v1/audio/speech",
+            json={"model": "tts-1", "voice": "serling", "input": "Hi", "response_format": "wav"},
+        )
+        self._oom_once = True
+        res = client.post(
+            "/v1/audio/speech",
+            json={"model": "tts-1", "voice": "orwell", "input": "Hi", "response_format": "wav"},
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(list(server_mod.loaded), ["orwell"])
+
 
 
 if __name__ == "__main__":

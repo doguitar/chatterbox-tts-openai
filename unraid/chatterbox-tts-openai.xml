@@ -23,12 +23,13 @@
   <Requires>Unraid 6.12+ with NVIDIA driver plugin. GHCR packages start private: docker login ghcr.io, or set the package public. Put voices.json and clones/*.wav under the config path.</Requires>
   <Config Name="API Port" Target="8080" Default="8080" Mode="tcp" Description="OpenAI /v1/audio/speech listen port" Type="Port" Display="always" Required="true" Mask="false">8080</Config>
   <Config Name="Config" Target="/config" Default="/mnt/user/appdata/chatterbox-tts-openai/config" Mode="rw" Description="voices.json and clones/*.wav" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/chatterbox-tts-openai/config</Config>
+  <Config Name="Models" Target="/models" Default="/mnt/user/appdata/chatterbox-tts-openai/models" Mode="rw" Description="Drop pack folders with pack.json here, then Rescan models" Type="Path" Display="always" Required="false" Mask="false">/mnt/user/appdata/chatterbox-tts-openai/models</Config>
   <Config Name="TTS_DEVICE" Target="TTS_DEVICE" Default="cuda:0" Mode="" Description="Inference device" Type="Variable" Display="always" Required="false" Mask="false">cuda:0</Config>
   <Config Name="TTS_VARIANT" Target="TTS_VARIANT" Default="turbo" Mode="" Description="turbo, nano, english, or multilingual" Type="Variable" Display="always" Required="false" Mask="false">turbo</Config>
   <Config Name="TTS_VOICES" Target="TTS_VOICES" Default="/config/voices.json" Mode="" Description="Voice preset file" Type="Variable" Display="advanced" Required="false" Mask="false">/config/voices.json</Config>
   <Config Name="TTS_MODEL_NAME" Target="TTS_MODEL_NAME" Default="tts-1" Mode="" Description="Public OpenAI model id" Type="Variable" Display="advanced" Required="false" Mask="false">tts-1</Config>
   <Config Name="TTS_LANGUAGE" Target="TTS_LANGUAGE" Default="en" Mode="" Description="Default language id for multilingual" Type="Variable" Display="advanced" Required="false" Mask="false">en</Config>
-  <Config Name="TTS_LOAD_POLICY" Target="TTS_LOAD_POLICY" Default="lazy" Mode="" Description="lazy or one" Type="Variable" Display="advanced" Required="false" Mask="false">lazy</Config>
+  <Config Name="TTS_LOAD_POLICY" Target="TTS_LOAD_POLICY" Default="lazy" Mode="" Description="lazy (keep packs), one (single resident), or all (preload)" Type="Variable" Display="advanced" Required="false" Mask="false">lazy</Config>
   <Config Name="TTS_EXAGGERATION" Target="TTS_EXAGGERATION" Default="" Mode="" Description="english/multilingual exaggeration (float)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="TTS_CFG_WEIGHT" Target="TTS_CFG_WEIGHT" Default="" Mode="" Description="english/multilingual CFG weight (float)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
 </Container>

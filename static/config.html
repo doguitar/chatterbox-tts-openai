@@ -35,6 +35,7 @@
       <tbody id="clone-rows"></tbody>
     </table>
     <p><button type="button" id="add-clone">Add clone preset</button></p>
+    <p><button type="button" id="rescan">Rescan models</button></p>
     <p id="status"></p>
     <h2>Voices clients can use now</h2>
     <ul id="live-voices"></ul>
@@ -91,6 +92,14 @@
       }
     }
     document.getElementById("add-clone").addEventListener("click", () => row("", ""));
+    document.getElementById("rescan").addEventListener("click", async () => {
+      const res = await fetch("/ui/rescan", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      statusEl.textContent = res.ok
+        ? "rescanned " + ((data.models || []).map((m) => m.id).join(", ") || "none")
+        : (data.detail || ("http " + res.status));
+      if (res.ok) load();
+    });
     load().catch((err) => { statusEl.textContent = String(err); });
   </script>
 </body>

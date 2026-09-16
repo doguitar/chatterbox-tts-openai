@@ -33,18 +33,26 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from adapter import call_generate, load_engine
 from device import select_device
 from models import (
+    PRETRAINED_ENGINE_KEY,
     VoiceOverlay,
+    discover_packs,
+    engine_cache_key,
     engine_metadata,
+    is_memory_full_error,
     is_public_model_request,
     listed_voice_names,
     load_voices_document,
+    lru_touch,
+    lru_victim,
     overlay_clone_ref,
     overlay_instructions,
     overlay_kind,
+    pack_voice_overlays,
     parse_load_policy,
     parse_variant,
     parse_voice_overlays,
     public_default_voice,
+    resolve_pack_for_voice,
     resolve_reference_wav,
     resolve_voice_route,
     supports_builtin_default,
@@ -80,7 +88,7 @@ AUDIO_FORMATS = {
 
 HOST = os.environ.get("TTS_HOST", "0.0.0.0")
 PORT = int(os.environ.get("TTS_PORT", "8080"))
-MODEL_PATH = os.environ.get("TTS_MODEL", os.environ.get("MODEL_PATH", "")).strip()
+MODEL_PATH = os.environ.get("TTS_MODEL", os.environ.get("MODEL_PATH", "/models")).strip() or "/models"
 VOICES_PATH = Path(os.environ.get("TTS_VOICES", "/config/voices.json"))
 CLONES_DIR = VOICES_PATH.parent / "clones"
 DEFAULT_LANGUAGE = os.environ.get("TTS_LANGUAGE", "en")
@@ -118,8 +126,12 @@ DEVICE = pick_device()
 
 app = FastAPI(title="Chatterbox TTS OpenAI")
 lock = threading.Lock()
-engine: Any = None
+loaded: dict[str, Any] = {}
+lru_order: list[str] = []
+engine_variant_by: dict[str, str] = {}
 voice_overlays: list[VoiceOverlay] = []
+catalog: list[tuple[str, Path, dict]] = []
+active_pack: tuple[str, Path, dict] | None = None
 default_voice = ""
 ready_error: str | None = None
 BODY_LOG_LIMIT = int(os.environ.get("TTS_LOG_BODY_LIMIT", "8000"))
@@ -221,7 +233,8 @@ def encode_audio(audio: np.ndarray, sr: int, fmt: str) -> tuple[bytes, str]:
 
 def _rebuild_voices() -> None:
     global voice_overlays, default_voice
-    voice_overlays = _read_overlays()
+    configured = _read_overlays()
+    voice_overlays = pack_voice_overlays(catalog) + configured
     default_voice = public_default_voice(
         voice_overlays,
         os.environ.get("TTS_DEFAULT_VOICE", ""),
@@ -242,51 +255,154 @@ def _voices_ui_payload() -> dict:
     }
 
 
-def _load_one() -> Any:
-    global engine
-    if engine is not None:
-        return engine
-    engine = load_engine(VARIANT, DEVICE, MODEL_PATH, T3_MODEL)
+def _catalog_entry(key: str) -> tuple[str, Path, dict] | None:
+    wanted = (key or "").strip().lower()
+    for alias, path, data in catalog:
+        if alias.lower() == wanted or path.name.lower() == wanted:
+            return alias, path, data
+    return None
+
+
+def _models_payload() -> list[dict]:
+    rows = [
+        {
+            "id": alias,
+            "path": str(path),
+            "kind": str(data.get("model") or data.get("engine") or "pack"),
+            "loaded": alias in loaded,
+        }
+        for alias, path, data in catalog
+    ]
+    if PRETRAINED_ENGINE_KEY in loaded:
+        rows.append(
+            {
+                "id": PRETRAINED_ENGINE_KEY,
+                "path": "(pretrained)",
+                "kind": VARIANT,
+                "loaded": True,
+            }
+        )
+    return rows
+
+
+def _unload_one(key: str) -> None:
+    global lru_order
+    engine = loaded.pop(key, None)
+    engine_variant_by.pop(key, None)
+    lru_order = [item for item in lru_order if item != key]
+    if engine is None:
+        return
+    del engine
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print(f"unloaded engine={key!r}", flush=True)
+
+
+def _load_engine_once(key: str) -> Any:
+    global lru_order
+    if key in loaded:
+        lru_order = lru_touch(lru_order, key)
+        return loaded[key]
+    pack = None if key == PRETRAINED_ENGINE_KEY else _catalog_entry(key)
+    if key != PRETRAINED_ENGINE_KEY and pack is None:
+        raise HTTPException(status_code=400, detail=f"unknown pack {key!r}")
+    pack_path = str(pack[1]) if pack is not None else ""
+    variant = "turbo" if pack is not None else VARIANT
+    engine = load_engine(variant, DEVICE, pack_path, T3_MODEL)
+    loaded[key] = engine
+    engine_variant_by[key] = variant
+    lru_order = lru_touch(lru_order, key)
     print(
-        f"loaded variant={VARIANT} device={DEVICE} model_path={MODEL_PATH or '(pretrained)'} "
-        f"t3={T3_MODEL}",
+        f"loaded engine={key!r} variant={variant} device={DEVICE} "
+        f"model_path={pack_path or '(pretrained)'} t3={T3_MODEL} resident={list(loaded)}",
         flush=True,
     )
     return engine
 
 
-def _unload_one() -> None:
-    global engine
-    if engine is None:
-        return
-    del engine
-    engine = None
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    print("unloaded chatterbox engine", flush=True)
+def _load_one(key: str) -> Any:
+    while True:
+        try:
+            return _load_engine_once(key)
+        except Exception as exc:
+            if not is_memory_full_error(exc):
+                raise
+            victim = lru_victim(lru_order, key)
+            if victim is None:
+                raise
+            print(
+                f"memory full loading {key!r}; unloading {victim!r}",
+                flush=True,
+            )
+            _unload_one(victim)
 
 
-def _ensure_engine() -> Any:
-    return _load_one()
+def _ensure_engine(key: str) -> tuple[Any, str]:
+    if LOAD_POLICY == "one":
+        for mid in list(loaded):
+            if mid != key:
+                _unload_one(mid)
+    engine = _load_one(key)
+    return engine, engine_variant_by[key]
 
 
 @app.on_event("startup")
 def startup() -> None:
     global ready_error
-    _rebuild_voices()
+    _rescan_catalog(unload=False)
     try:
-        if LOAD_POLICY == "one":
-            _load_one()
+        if LOAD_POLICY == "all":
+            for alias, _path, _data in catalog:
+                _load_one(alias)
+            if not catalog:
+                _load_one(PRETRAINED_ENGINE_KEY)
+        elif LOAD_POLICY == "one":
+            key = engine_cache_key(active_pack)
+            _load_one(key)
     except Exception as exc:
         ready_error = str(exc)
         raise
     print(
         f"policy={LOAD_POLICY} public={MODEL_NAME} variant={VARIANT} "
         f"voices={listed_voice_names(voice_overlays, VARIANT)} default_voice={default_voice} "
-        f"device={DEVICE}",
+        f"device={DEVICE} packs={[p[0] for p in catalog]} loaded={list(loaded)}",
         flush=True,
     )
+
+
+def _rescan_catalog(unload: bool = True) -> dict:
+    global catalog, active_pack
+    root = Path(MODEL_PATH)
+    catalog = discover_packs(root)
+    requested = os.environ.get("TTS_DEFAULT_MODEL", "").strip().lower()
+    active_pack = None
+    if catalog:
+        active_pack = catalog[0]
+        for item in catalog:
+            if item[0].lower() == requested or item[1].name.lower() == requested:
+                active_pack = item
+                break
+    keep = {alias for alias, _path, _data in catalog}
+    keep.add(PRETRAINED_ENGINE_KEY)
+    if unload:
+        for mid in list(loaded):
+            if mid not in keep:
+                _unload_one(mid)
+    _rebuild_voices()
+    print(
+        f"rescanned packs={[p[0] for p in catalog]} root={root} default_voice={default_voice} "
+        f"loaded={list(loaded)}",
+        flush=True,
+    )
+    return {
+        "ok": True,
+        "voices": listed_voice_names(voice_overlays, VARIANT),
+        "default": default_voice,
+        "loaded": list(loaded),
+        "models": _models_payload(),
+    }
+
 
 
 @app.get("/")
@@ -424,6 +540,11 @@ async def ui_clone_preset_delete(alias: str):
     return payload
 
 
+@app.post("/ui/rescan")
+def ui_rescan():
+    with lock:
+        return _rescan_catalog()
+
 @app.get("/health")
 def health():
     if ready_error:
@@ -435,11 +556,13 @@ def health():
         "device": DEVICE,
         "model": MODEL_NAME,
         "variant": VARIANT,
-        "loaded": engine is not None,
+        "loaded": list(loaded),
         "policy": LOAD_POLICY,
         "voice_mode": VARIANT_META["voice_mode"],
         "sample_rate": VARIANT_META["sample_rate"],
+        "models": _models_payload(),
     }
+
 
 
 @app.get("/v1/audio/voices")
@@ -554,7 +677,7 @@ def _run_speech(
             reason = ""
         elif okind == "voice_clone":
             rel, _rtext = overlay_clone_ref(voice, voice_overlays)
-            wav = resolve_reference_wav(rel, VOICES_PATH.parent)
+            wav = resolve_reference_wav(rel, VOICES_PATH.parent, Path(MODEL_PATH))
             if wav is None:
                 raise HTTPException(status_code=400, detail="clone preset missing wav")
             prompt_path = str(wav)
@@ -563,7 +686,7 @@ def _run_speech(
             prompt_path = None
         elif not prompt_path:
             rel, _rtext = overlay_clone_ref(used, voice_overlays)
-            wav = resolve_reference_wav(rel, VOICES_PATH.parent)
+            wav = resolve_reference_wav(rel, VOICES_PATH.parent, Path(MODEL_PATH))
             if wav is None:
                 if not supports_builtin_default(VARIANT):
                     raise HTTPException(
@@ -575,15 +698,20 @@ def _run_speech(
 
         if speed is not None:
             print(f"speed={speed} ignored; Chatterbox has no speed parameter", flush=True)
-        eng = _ensure_engine()
+        pack = resolve_pack_for_voice(voice, voice_overlays, catalog) or resolve_pack_for_voice(
+            used, voice_overlays, catalog
+        )
+        key = engine_cache_key(pack)
+        eng, variant = _ensure_engine(key)
         print(
-            f"speech public={MODEL_NAME} variant={VARIANT} voice={voice!r} -> {used} "
-            f"format={fmt} chars={len(text)} fallback={fell_back} ref={prompt_path!r}",
+            f"speech public={MODEL_NAME} engine={key!r} variant={variant} voice={voice!r} -> {used} "
+            f"format={fmt} chars={len(text)} fallback={fell_back} ref={prompt_path!r} "
+            f"resident={list(loaded)}",
             flush=True,
         )
         audio, sr = call_generate(
             eng,
-            VARIANT,
+            variant,
             text,
             audio_prompt_path=prompt_path,
             language=language,
@@ -591,17 +719,23 @@ def _run_speech(
             cfg_weight=TTS_CFG_WEIGHT,
         )
     body, media = encode_audio(audio, sr, fmt)
-    return VARIANT, used, fell_back, reason, body, media, speed is not None
+    return key, used, fell_back, reason, body, media, speed is not None
+
 
 
 def _speech_response(mid, used, fell_back, reason, body, media, speed_ignored: bool):
-    headers = {"X-TTS-Voice-Used": used, "X-TTS-Model": mid, "X-TTS-Variant": VARIANT}
+    headers = {
+        "X-TTS-Voice-Used": used,
+        "X-TTS-Model": mid,
+        "X-TTS-Variant": engine_variant_by.get(mid, VARIANT),
+    }
     if fell_back:
         headers["X-TTS-Fell-Back"] = "1"
         headers["X-TTS-Fell-Back-Reason"] = reason
     if speed_ignored:
         headers["X-TTS-Speed-Ignored"] = "1"
     return Response(content=body, media_type=media, headers=headers)
+
 
 
 async def _openai_speech_multipart(request: Request):
