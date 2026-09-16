@@ -156,7 +156,26 @@ docker run --rm --gpus all -p 8080:8080 \
   ghcr.io/doguitar/chatterbox-tts-openai:cuda
 ```
 
-Published images: `ghcr.io/doguitar/chatterbox-tts-openai:cpu` (`:latest`) and `:cuda`. Unraid templates: `unraid/chatterbox-tts-openai-cpu.xml` and `unraid/chatterbox-tts-openai.xml` (Config + Models paths).
+Published images: `ghcr.io/doguitar/chatterbox-tts-openai:cpu` (`:latest`) and `:cuda`.
+
+## Unraid
+
+Templates live in `unraid/`:
+
+- `chatterbox-tts-openai.xml` — CUDA (`:cuda`, `--gpus=all`)
+- `chatterbox-tts-openai-cpu.xml` — CPU (`:cpu`)
+
+On the Unraid host, copy them into Docker’s user-template directory (`my-` prefix is required for Add Container to list them):
+
+```bash
+mkdir -p /boot/config/plugins/dockerMan/templates-user
+curl -fsSL -o /boot/config/plugins/dockerMan/templates-user/my-chatterbox-tts-openai.xml \
+  https://raw.githubusercontent.com/doguitar/chatterbox-tts-openai/main/unraid/chatterbox-tts-openai.xml
+curl -fsSL -o /boot/config/plugins/dockerMan/templates-user/my-chatterbox-tts-openai-cpu.xml \
+  https://raw.githubusercontent.com/doguitar/chatterbox-tts-openai/main/unraid/chatterbox-tts-openai-cpu.xml
+```
+
+Then **Docker → Add Container**, open the **Template** dropdown, and pick `chatterbox-tts-openai` or `chatterbox-tts-openai-cpu`. Paths default to `/mnt/user/appdata/chatterbox-tts-openai/{config,models,hf}`. GHCR packages start private: `docker login ghcr.io` on the Unraid host, or make the package public.
 
 ## curl
 
