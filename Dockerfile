@@ -35,9 +35,9 @@ ARG TORCH_BACKEND=cpu
 # Chatterbox 0.1.7 pins torch==2.6.0 / torchaudio==2.6.0. Reinstall the matching
 # CPU or CUDA wheel after the package install so the image backend is explicit.
 RUN if [ "$TORCH_BACKEND" = "cpu" ]; then \
-        pip3 install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu; \
+        pip3 install --force-reinstall --no-deps torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu; \
     else \
-        pip3 install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124; \
+        pip3 install --force-reinstall torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124; \
     fi \
     && rm -rf /root/.cache /tmp/*
 
