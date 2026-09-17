@@ -177,6 +177,204 @@ class SpeechHttpTests(unittest.TestCase):
 
 
 
+
+    def _client_unloaded(self, variant="turbo"):
+        self.env["TTS_VARIANT"] = variant
+        self.env["TTS_MODEL"] = str(self.root / "empty-models")
+        (self.root / "empty-models").mkdir(exist_ok=True)
+        engines = []
+
+        def fake_load(v, device, model_path="", t3_model="v3"):
+            eng = FakeEngine()
+            engines.append(eng)
+            return eng
+
+        with patch.dict("os.environ", self.env, clear=False):
+            import importlib
+            import server as server_mod
+
+            importlib.reload(server_mod)
+            server_mod.VOICES_PATH = self.root / "voices.json"
+            server_mod.CLONES_DIR = self.root / "clones"
+            server_mod.MODEL_PATH = str(self.root / "empty-models")
+            server_mod.VARIANT = variant
+            server_mod.load_engine = fake_load
+            server_mod._rescan_catalog(unload=False)
+            from fastapi.testclient import TestClient
+
+            return TestClient(server_mod.app), server_mod, engines
+
+    def test_pretrained_catalog_before_and_after_speech(self):
+        (self.root / "voices.json").write_text(
+            json.dumps(
+                {
+                    "generation": {"temperature": 0.7, "max_gen_len": 1200},
+                    "voices": {
+                        "jane": {
+                            "kind": "voice_clone",
+                            "ref_audio": "clones/jane.wav",
+                            "ref_text": "Hello from Jane.",
+                            "generation": {"temperature": 0.6},
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        client, server_mod, engines = self._client_unloaded()
+        health = client.get("/health").json()
+        models = health["models"]
+        pretrained = [m for m in models if m["id"] == "__pretrained__"]
+        self.assertEqual(len(pretrained), 1)
+        self.assertEqual(pretrained[0]["path"], "(pretrained)")
+        self.assertEqual(pretrained[0]["kind"], "turbo")
+        self.assertFalse(pretrained[0]["loaded"])
+        rescan = client.post("/ui/rescan").json()
+        self.assertEqual(sum(1 for m in rescan["models"] if m["id"] == "__pretrained__"), 1)
+        self.assertFalse(next(m["loaded"] for m in rescan["models"] if m["id"] == "__pretrained__"))
+        res = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "tts-1",
+                "voice": "jane",
+                "input": "This is sentence one. This is sentence two.",
+                "response_format": "wav",
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.headers.get("x-tts-model"), "__pretrained__")
+        self.assertEqual(engines[0].calls[0][1]["temperature"], 0.6)
+        self.assertEqual(engines[0].calls[0][1]["max_gen_len"], 1200)
+        after = client.get("/health").json()["models"]
+        self.assertEqual(sum(1 for m in after if m["id"] == "__pretrained__"), 1)
+        self.assertTrue(next(m["loaded"] for m in after if m["id"] == "__pretrained__"))
+
+    def test_clone_and_pack_generation_headers(self):
+        (self.root / "voices.json").write_text(
+            json.dumps(
+                {
+                    "generation": {"temperature": 0.7, "max_gen_len": 1200},
+                    "voices": {
+                        "jane": {
+                            "kind": "voice_clone",
+                            "ref_audio": "clones/jane.wav",
+                            "ref_text": "Hello from Jane.",
+                            "generation": {"temperature": 0.6},
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        models = self.root / "models"
+        models.mkdir()
+        pack = models / "GOOD-en-alice"
+        pack.mkdir()
+        (pack / "pack.json").write_text(
+            json.dumps(
+                {
+                    "name": "alice",
+                    "model": "turbo-lora",
+                    "reference": "reference.wav",
+                    "generation": {"max_gen_len": 900},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (pack / "reference.wav").write_bytes(b"RIFF....WAVE")
+        self.env["TTS_MODEL"] = str(models)
+        engines = {}
+
+        def fake_load(variant, device, model_path="", t3_model="v3"):
+            eng = FakeEngine()
+            engines[model_path or "__pretrained__"] = eng
+            return eng
+
+        with patch.dict("os.environ", self.env, clear=False):
+            import importlib
+            import server as server_mod
+
+            importlib.reload(server_mod)
+            server_mod.VOICES_PATH = self.root / "voices.json"
+            server_mod.CLONES_DIR = self.root / "clones"
+            server_mod.MODEL_PATH = str(models)
+            server_mod.load_engine = fake_load
+            server_mod._rescan_catalog(unload=False)
+            from fastapi.testclient import TestClient
+
+            client = TestClient(server_mod.app)
+
+        sentence = "This is sentence one. This is sentence two."
+        clone = client.post(
+            "/v1/audio/speech",
+            json={"model": "tts-1", "voice": "jane", "input": sentence, "response_format": "wav"},
+        )
+        self.assertEqual(clone.status_code, 200, clone.text)
+        self.assertEqual(clone.headers.get("x-tts-model"), "__pretrained__")
+        pre = engines["__pretrained__"]
+        self.assertEqual(pre.calls[0][1]["temperature"], 0.6)
+        self.assertEqual(pre.calls[0][1]["max_gen_len"], 1200)
+        pack_res = client.post(
+            "/v1/audio/speech",
+            json={"model": "tts-1", "voice": "alice", "input": sentence, "response_format": "wav"},
+        )
+        self.assertEqual(pack_res.status_code, 200, pack_res.text)
+        self.assertEqual(pack_res.headers.get("x-tts-model"), "alice")
+        pack_eng = next(eng for path, eng in engines.items() if path != "__pretrained__")
+        self.assertEqual(pack_eng.calls[0][1]["temperature"], 0.7)
+        self.assertEqual(pack_eng.calls[0][1]["max_gen_len"], 900)
+
+    def test_ui_voices_generation_round_trip_and_errors(self):
+        client, _fake, _mod = self._client("turbo")
+        payload = {
+            "generation": {"temperature": 0.0, "norm_loudness": False, "max_gen_len": 12},
+            "voices": {
+                "jane": {
+                    "kind": "voice_clone",
+                    "ref_audio": "clones/jane.wav",
+                    "generation": {"temperature": 0.6},
+                }
+            },
+        }
+        res = client.put("/ui/voices", json=payload)
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()["document"]
+        self.assertEqual(body["generation"]["temperature"], 0.0)
+        self.assertIs(body["generation"]["norm_loudness"], False)
+        again = client.get("/ui/voices").json()["document"]
+        self.assertEqual(again["generation"]["temperature"], 0.0)
+        self.assertIs(again["generation"]["norm_loudness"], False)
+        bad = client.put(
+            "/ui/voices",
+            json={"generation": {"nope": 1}, "voices": payload["voices"]},
+        )
+        self.assertEqual(bad.status_code, 400)
+        self.assertIn("generation.nope", bad.json()["detail"])
+        bad = client.put(
+            "/ui/voices",
+            json={"generation": {"top_k": 0}, "voices": payload["voices"]},
+        )
+        self.assertEqual(bad.status_code, 400)
+        self.assertIn("top_k", bad.json()["detail"])
+        bad = client.put(
+            "/ui/voices",
+            json={"generation": {"max_gen_len": 0}, "voices": payload["voices"]},
+        )
+        self.assertEqual(bad.status_code, 400)
+        bad = client.put(
+            "/ui/voices",
+            json={"generation": {"temperature": "x"}, "voices": payload["voices"]},
+        )
+        self.assertEqual(bad.status_code, 400)
+        bad = client.put(
+            "/ui/voices",
+            content=b'{"generation":{"top_p":Infinity},"voices":{"jane":{"kind":"voice_clone","ref_audio":"clones/jane.wav"}}}',
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(bad.status_code, 400)
+        self.assertIn("finite", bad.json()["detail"])
+
+
     def _pack(self, root, name, folder):
         pack = root / folder
         pack.mkdir()

@@ -13,25 +13,35 @@
     dl { display: grid; grid-template-columns: 8rem 1fr; gap: 0.25rem 0.75rem; }
     dt { color: #aaa; }
     table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-    th, td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid #333; }
+    th, td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid #333; vertical-align: top; }
     input { font: inherit; width: 100%; box-sizing: border-box; background: #1c1c1c; color: #eee; border: 1px solid #444; padding: 0.35rem; }
     button { font: inherit; background: #2a4a7a; color: #fff; border: 0; padding: 0.45rem 0.8rem; cursor: pointer; margin-right: 0.4rem; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .gen-grid { display: grid; grid-template-columns: repeat(3, minmax(8rem, 1fr)); gap: 0.4rem 0.75rem; }
+    .gen-grid label { display: block; font-size: 0.85rem; color: #bbb; }
+    .gen-grid input { margin-top: 0.2rem; }
   </style>
 </head>
 <body>
   <main>
     <nav><a href="/">Speak</a><a href="/clone">Clone</a><a href="/config">Config</a></nav>
     <h1>Reference voices</h1>
-    <p>Each public name maps to a WAV under the config directory (<code>clones/name.wav</code>). Turbo and Nano require a reference clip. English and multilingual also expose a built-in <code>default</code> voice that uses the checkpoint conditionals.</p>
+    <p>Each public name maps to a WAV under the config directory (<code>clones/name.wav</code>). Turbo and Nano require a reference clip. English and multilingual also expose a built-in <code>default</code> voice that uses the checkpoint conditionals. Blank generation fields inherit the global/upstream default. Pack generation stays in that pack's <code>pack.json</code>.</p>
     <dl>
       <dt>File</dt><dd id="path"></dd>
       <dt>Variant</dt><dd id="variant"></dd>
       <dt>Can save</dt><dd id="writable"></dd>
     </dl>
+    <h2>Active catalog</h2>
+    <p>Stock/base engine is <code>__pretrained__</code>. Pack rows are bind-mounted train artifacts.</p>
+    <ul id="catalog"></ul>
+    <h2>Global generation defaults</h2>
+    <p>Applied unless a selected clone or pack preset overrides the same key. These do not repair a bad checkpoint.</p>
+    <div id="global-gen" class="gen-grid"></div>
+    <p><button type="button" id="save-global">Save global generation</button></p>
     <h2>Clone presets</h2>
     <table>
-      <thead><tr><th>Public name</th><th>Transcript</th><th>Wav</th><th></th></tr></thead>
+      <thead><tr><th>Public name</th><th>Transcript</th><th>Wav</th><th>Generation override</th><th></th></tr></thead>
       <tbody id="clone-rows"></tbody>
     </table>
     <p><button type="button" id="add-clone">Add clone preset</button></p>
@@ -41,24 +51,105 @@
     <ul id="live-voices"></ul>
   </main>
   <script>
+    const GEN_KEYS = ["temperature", "top_k", "top_p", "repetition_penalty", "max_gen_len", "norm_loudness"];
     const cloneRowsEl = document.getElementById("clone-rows");
     const statusEl = document.getElementById("status");
-    function row(alias, refText) {
+    let currentDocument = {voices: {}};
+
+    function genInputs(values) {
+      const wrap = document.createElement("div");
+      wrap.className = "gen-grid";
+      for (const key of GEN_KEYS) {
+        const lab = document.createElement("label");
+        lab.appendChild(document.createTextNode(key));
+        const input = document.createElement("input");
+        input.dataset.key = key;
+        input.type = "text";
+        input.placeholder = "inherit";
+        const cur = values && values[key];
+        if (key === "norm_loudness") {
+          if (cur === true) input.value = "true";
+          else if (cur === false) input.value = "false";
+        } else if (cur === 0 || cur) {
+          input.value = String(cur);
+        }
+        lab.appendChild(input);
+        wrap.appendChild(lab);
+      }
+      return wrap;
+    }
+
+    function readGen(root) {
+      const out = {};
+      let any = false;
+      for (const key of GEN_KEYS) {
+        const el = root.querySelector('[data-key="' + key + '"]');
+        if (!el) continue;
+        const raw = el.value.trim();
+        if (!raw) continue;
+        any = true;
+        if (key === "norm_loudness") out[key] = raw === "true" ? true : raw === "false" ? false : raw;
+        else if (key === "top_k" || key === "max_gen_len") out[key] = Number(raw);
+        else out[key] = Number(raw);
+      }
+      return any ? out : undefined;
+    }
+
+    function catalogLabel(m) {
+      if (m.id === "__pretrained__") {
+        return "__pretrained__ (stock/base " + (m.kind || "") + ")" + (m.loaded ? " loaded" : " not loaded");
+      }
+      return m.id + " (pack" + (m.loaded ? ", loaded" : "") + ")";
+    }
+
+    function row(alias, spec) {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td><input class="alias" value="${alias || ""}"></td>
-        <td><input class="ref_text" value="${refText || ""}"></td>
-        <td><input class="wav" type="file" accept="audio/wav,.wav"></td>
-        <td><button type="button" class="save">Save</button> <button type="button" class="del">Delete</button></td>`;
+      const nameTd = document.createElement("td");
+      nameTd.innerHTML = '<input class="alias">';
+      nameTd.querySelector("input").value = alias || "";
+      const textTd = document.createElement("td");
+      textTd.innerHTML = '<input class="ref_text">';
+      textTd.querySelector("input").value = (spec && spec.ref_text) || "";
+      const wavTd = document.createElement("td");
+      wavTd.innerHTML = '<input class="wav" type="file" accept="audio/wav,.wav">';
+      const genTd = document.createElement("td");
+      genTd.appendChild(genInputs(spec && spec.generation));
+      const actTd = document.createElement("td");
+      actTd.innerHTML = '<button type="button" class="save">Save</button> <button type="button" class="del">Delete</button>';
+      tr.appendChild(nameTd);
+      tr.appendChild(textTd);
+      tr.appendChild(wavTd);
+      tr.appendChild(genTd);
+      tr.appendChild(actTd);
       tr.querySelector(".save").addEventListener("click", async () => {
         const name = tr.querySelector(".alias").value.trim();
-        const text = tr.querySelector(".ref_text").value.trim();
+        const textv = tr.querySelector(".ref_text").value.trim();
         const file = tr.querySelector(".wav").files[0];
+        const generation = readGen(tr);
         if (!name) { statusEl.textContent = "clone requires a public name"; return; }
-        const form = new FormData();
-        form.append("alias", name);
-        form.append("ref_text", text);
-        if (file) form.append("ref_audio", file);
-        const res = await fetch("/ui/clone-preset", { method: "POST", body: form });
+        if (file) {
+          const form = new FormData();
+          form.append("alias", name);
+          form.append("ref_text", textv);
+          form.append("ref_audio", file);
+          if (generation) form.append("generation", JSON.stringify(generation));
+          const res = await fetch("/ui/clone-preset", { method: "POST", body: form });
+          const data = await res.json().catch(() => ({}));
+          statusEl.textContent = res.ok ? "saved " + name : (data.detail || ("http " + res.status));
+          if (res.ok) load();
+          return;
+        }
+        const voices = Object.assign({}, currentDocument.voices || {});
+        const prev = voices[name] && typeof voices[name] === "object" ? Object.assign({}, voices[name]) : {kind: "voice_clone"};
+        if (!prev.ref_audio) { statusEl.textContent = "clone requires a wav file"; return; }
+        prev.kind = "voice_clone";
+        if (textv) prev.ref_text = textv;
+        else delete prev.ref_text;
+        if (generation) prev.generation = generation;
+        else delete prev.generation;
+        voices[name] = prev;
+        const payload = Object.assign({}, currentDocument, {voices});
+        const res = await fetch("/ui/voices", { method: "PUT", headers: {"content-type": "application/json"}, body: JSON.stringify(payload) });
         const data = await res.json().catch(() => ({}));
         statusEl.textContent = res.ok ? "saved " + name : (data.detail || ("http " + res.status));
         if (res.ok) load();
@@ -72,15 +163,28 @@
       });
       cloneRowsEl.appendChild(tr);
     }
+
     async function load() {
       const cfg = await fetch("/ui/voices").then((r) => r.json());
+      currentDocument = cfg.document || {voices: {}};
       document.getElementById("path").textContent = cfg.path;
       document.getElementById("variant").textContent = cfg.variant || "";
       document.getElementById("writable").textContent = String(cfg.writable);
+      const gwrap = document.getElementById("global-gen");
+      gwrap.innerHTML = "";
+      gwrap.appendChild(genInputs(currentDocument.generation || {}));
       cloneRowsEl.innerHTML = "";
-      const voices = (cfg.document && cfg.document.voices) || {};
+      const voices = currentDocument.voices || {};
       for (const [name, spec] of Object.entries(voices)) {
-        if (spec && spec.kind === "voice_clone") row(name, spec.ref_text || "");
+        if (spec && spec.kind === "voice_clone") row(name, spec);
+      }
+      const health = await fetch("/health").then((r) => r.json()).catch(() => ({}));
+      const cat = document.getElementById("catalog");
+      cat.innerHTML = "";
+      for (const m of health.models || []) {
+        const li = document.createElement("li");
+        li.textContent = catalogLabel(m);
+        cat.appendChild(li);
       }
       const live = await fetch("/v1/voices").then((r) => r.json());
       const ul = document.getElementById("live-voices");
@@ -91,12 +195,25 @@
         ul.appendChild(li);
       }
     }
-    document.getElementById("add-clone").addEventListener("click", () => row("", ""));
+    document.getElementById("save-global").addEventListener("click", async () => {
+      const generation = readGen(document.getElementById("global-gen"));
+      const payload = Object.assign({}, currentDocument);
+      if (generation) payload.generation = generation;
+      else delete payload.generation;
+      const res = await fetch("/ui/voices", { method: "PUT", headers: {"content-type": "application/json"}, body: JSON.stringify(payload) });
+      const data = await res.json().catch(() => ({}));
+      statusEl.textContent = res.ok ? "saved global generation" : (data.detail || ("http " + res.status));
+      if (res.ok) load();
+    });
+    document.getElementById("add-clone").addEventListener("click", () => row("", {}));
     document.getElementById("rescan").addEventListener("click", async () => {
       const res = await fetch("/ui/rescan", { method: "POST" });
       const data = await res.json().catch(() => ({}));
+      const labels = (data.models || []).map((m) => (
+        m.id === "__pretrained__" ? "__pretrained__ (stock/base)" : m.id
+      ));
       statusEl.textContent = res.ok
-        ? "rescanned " + ((data.models || []).map((m) => m.id).join(", ") || "none")
+        ? "rescanned " + (labels.join(", ") || "none")
         : (data.detail || ("http " + res.status));
       if (res.ok) load();
     });

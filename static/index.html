@@ -81,7 +81,10 @@
         }
         const voices = await fetch("/v1/voices").then((r) => r.json());
         fillVoices(voices);
-        statusEl.textContent = "packs: " + ((data.models || []).map((m) => m.id).join(", ") || "none");
+        const labels = (data.models || []).map((m) => (
+          m.id === "__pretrained__" ? "__pretrained__ (stock/base " + (m.kind || "") + ")" : m.id
+        ));
+        statusEl.textContent = "models: " + (labels.join(", ") || "none");
       } catch (err) {
         statusEl.textContent = String(err);
       }

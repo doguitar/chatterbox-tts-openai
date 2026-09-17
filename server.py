@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from adapter import call_generate, load_engine
 from device import select_device
 from models import (
+    GENERATION_KEYS,
     PRETRAINED_ENGINE_KEY,
     VoiceOverlay,
     discover_packs,
@@ -44,10 +45,13 @@ from models import (
     load_voices_document,
     lru_touch,
     lru_victim,
+    merge_generation,
     overlay_clone_ref,
+    overlay_generation,
     overlay_instructions,
     overlay_kind,
     pack_voice_overlays,
+    parse_generation_config,
     parse_load_policy,
     parse_variant,
     parse_voice_overlays,
@@ -56,6 +60,7 @@ from models import (
     resolve_reference_wav,
     resolve_voice_route,
     supports_builtin_default,
+    try_parse_generation,
     validate_voices_document,
     voices_file_writable,
     write_voices_document,
@@ -130,6 +135,7 @@ loaded: dict[str, Any] = {}
 lru_order: list[str] = []
 engine_variant_by: dict[str, str] = {}
 voice_overlays: list[VoiceOverlay] = []
+generation_defaults: dict = {}
 catalog: list[tuple[str, Path, dict]] = []
 active_pack: tuple[str, Path, dict] | None = None
 default_voice = ""
@@ -202,9 +208,14 @@ def wav_bytes(audio: np.ndarray, sr: int) -> bytes:
 
 
 def _read_overlays() -> list[VoiceOverlay]:
+    global generation_defaults
     data = None
+    generation_defaults = {}
     if VOICES_PATH.is_file():
         data = json.loads(VOICES_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            parsed = try_parse_generation(data.get("generation"), prefix="generation")
+            generation_defaults = parsed or {}
     return parse_voice_overlays(data, os.environ.get("TTS_SPEAKERS", ""))
 
 
@@ -273,13 +284,13 @@ def _models_payload() -> list[dict]:
         }
         for alias, path, data in catalog
     ]
-    if PRETRAINED_ENGINE_KEY in loaded:
+    if not any(row["id"] == PRETRAINED_ENGINE_KEY for row in rows):
         rows.append(
             {
                 "id": PRETRAINED_ENGINE_KEY,
                 "path": "(pretrained)",
                 "kind": VARIANT,
-                "loaded": True,
+                "loaded": PRETRAINED_ENGINE_KEY in loaded,
             }
         )
     return rows
@@ -493,9 +504,16 @@ async def ui_clone_preset(request: Request):
     entry = {"kind": "voice_clone", "ref_audio": f"clones/{alias}.wav"}
     if ref_text:
         entry["ref_text"] = ref_text
+    gen = _generation_from_form(form)
+    if gen:
+        entry["generation"] = gen
+    else:
+        prior = voices.get(alias)
+        if isinstance(prior, dict) and prior.get("generation") is not None:
+            entry["generation"] = prior["generation"]
     voices[alias] = entry
     try:
-        document = validate_voices_document({"voices": voices})
+        document = validate_voices_document({**document, "voices": voices})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     try:
@@ -526,7 +544,7 @@ async def ui_clone_preset_delete(alias: str):
     voices = dict(document.get("voices") or {})
     voices.pop(safe, None)
     try:
-        document = validate_voices_document({"voices": voices})
+        document = validate_voices_document({**document, "voices": voices})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     try:
@@ -630,6 +648,44 @@ def _is_wav_upload(filename: str, content_type: str, raw: bytes) -> bool:
     return raw[:4] == b"RIFF" and raw[8:12] == b"WAVE"
 
 
+
+def _generation_from_form(form) -> dict | None:
+    raw = form.get("generation")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"generation invalid JSON: {exc}") from exc
+        try:
+            return parse_generation_config(decoded, prefix="generation")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    collected = {}
+    for key in GENERATION_KEYS:
+        value = form.get(key)
+        if value in (None, ""):
+            continue
+        if key == "norm_loudness":
+            collected[key] = str(value).strip().lower() in {"1", "true", "yes", "on"}
+            continue
+        if key in {"top_k", "max_gen_len"}:
+            try:
+                collected[key] = int(str(value).strip())
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"generation.{key} must be a positive integer") from exc
+            continue
+        try:
+            collected[key] = float(str(value).strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"generation.{key} must be a number") from exc
+    if not collected:
+        return None
+    try:
+        return parse_generation_config(collected, prefix="generation")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 async def _read_clone_wav(upload) -> bytes:
     filename = getattr(upload, "filename", "") or ""
     content_type = getattr(upload, "content_type", "") or ""
@@ -702,11 +758,16 @@ def _run_speech(
             used, voice_overlays, catalog
         )
         key = engine_cache_key(pack)
+        if pack is not None:
+            preset = try_parse_generation(pack[2].get("generation"), prefix=f"{pack[0]}: generation")
+        else:
+            preset = overlay_generation(voice, voice_overlays) or overlay_generation(used, voice_overlays)
+        merged = merge_generation(generation_defaults, preset)
         eng, variant = _ensure_engine(key)
         print(
             f"speech public={MODEL_NAME} engine={key!r} variant={variant} voice={voice!r} -> {used} "
             f"format={fmt} chars={len(text)} fallback={fell_back} ref={prompt_path!r} "
-            f"resident={list(loaded)}",
+            f"generation={merged} resident={list(loaded)}",
             flush=True,
         )
         audio, sr = call_generate(
@@ -717,6 +778,12 @@ def _run_speech(
             language=language,
             exaggeration=TTS_EXAGGERATION,
             cfg_weight=TTS_CFG_WEIGHT,
+            temperature=merged.get("temperature"),
+            top_k=merged.get("top_k"),
+            top_p=merged.get("top_p"),
+            repetition_penalty=merged.get("repetition_penalty"),
+            max_gen_len=merged.get("max_gen_len"),
+            norm_loudness=merged.get("norm_loudness"),
         )
     body, media = encode_audio(audio, sr, fmt)
     return key, used, fell_back, reason, body, media, speed is not None
