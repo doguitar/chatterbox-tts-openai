@@ -17,7 +17,7 @@
     input { font: inherit; width: 100%; box-sizing: border-box; background: #1c1c1c; color: #eee; border: 1px solid #444; padding: 0.35rem; }
     button { font: inherit; background: #2a4a7a; color: #fff; border: 0; padding: 0.45rem 0.8rem; cursor: pointer; margin-right: 0.4rem; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
-    .gen-grid { display: grid; grid-template-columns: repeat(3, minmax(8rem, 1fr)); gap: 0.4rem 0.75rem; }
+    .gen-grid { display: grid; grid-template-columns: repeat(4, minmax(7rem, 1fr)); gap: 0.4rem 0.75rem; }
     .gen-grid label { display: block; font-size: 0.85rem; color: #bbb; }
     .gen-grid input { margin-top: 0.2rem; }
   </style>
@@ -51,7 +51,7 @@
     <ul id="live-voices"></ul>
   </main>
   <script>
-    const GEN_KEYS = ["temperature", "top_k", "top_p", "repetition_penalty", "max_gen_len", "norm_loudness"];
+    const GEN_KEYS = ["temperature", "top_k", "top_p", "repetition_penalty", "max_gen_len", "norm_loudness", "exaggeration", "cfg_weight"];
     const cloneRowsEl = document.getElementById("clone-rows");
     const statusEl = document.getElementById("status");
     let currentDocument = {voices: {}};

@@ -261,11 +261,20 @@ class EngineCacheHelperTests(unittest.TestCase):
 class GenerationConfigTests(unittest.TestCase):
     def test_parse_preserves_zero_and_false(self):
         parsed = parse_generation_config(
-            {"temperature": 0.0, "norm_loudness": False, "top_k": 1, "max_gen_len": 1}
+            {
+                "temperature": 0.0,
+                "norm_loudness": False,
+                "top_k": 1,
+                "max_gen_len": 1,
+                "exaggeration": 0.5,
+                "cfg_weight": 0.3,
+            }
         )
         self.assertEqual(parsed["temperature"], 0.0)
         self.assertIs(parsed["norm_loudness"], False)
         self.assertEqual(parsed["top_k"], 1)
+        self.assertEqual(parsed["exaggeration"], 0.5)
+        self.assertEqual(parsed["cfg_weight"], 0.3)
 
     def test_missing_is_none(self):
         self.assertIsNone(parse_generation_config(None))

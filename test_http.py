@@ -85,6 +85,10 @@ class SpeechHttpTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.text)
         self.assertEqual(res.headers.get("content-type"), "audio/wav")
         self.assertEqual(res.headers.get("x-tts-voice-used"), "jane")
+        self.assertEqual(res.headers.get("x-tts-model"), "__pretrained__")
+        self.assertEqual(res.headers.get("x-tts-load-state"), "hot")
+        self.assertEqual(res.headers.get("x-tts-input-tokens"), "unavailable")
+        self.assertRegex(res.headers.get("x-tts-processing-time-ms") or "", r"^\d+$")
         self.assertGreater(len(res.content), 44)
         self.assertEqual(fake.calls[0][0], "Hello from Chatterbox.")
         self.assertEqual(fake.calls[0][1]["audio_prompt_path"], str(self.wav.resolve()))
@@ -103,6 +107,34 @@ class SpeechHttpTests(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 200, res.text)
         self.assertEqual(fake.calls[0][1]["language_id"], "fr")
+
+    def test_english_clone_generation_exaggeration(self):
+        client, fake, server_mod = self._client("english")
+        (self.root / "voices.json").write_text(
+            json.dumps(
+                {
+                    "generation": {"exaggeration": 0.4, "cfg_weight": 0.2},
+                    "voices": {
+                        "jane": {
+                            "kind": "voice_clone",
+                            "ref_audio": "clones/jane.wav",
+                            "ref_text": "Hello from Jane.",
+                            "generation": {"exaggeration": 0.9, "cfg_weight": 0.1},
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        server_mod._rebuild_voices()
+        res = client.post(
+            "/v1/audio/speech",
+            json={"model": "tts-1", "voice": "jane", "input": "Hello.", "response_format": "wav"},
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(fake.calls[0][1]["exaggeration"], 0.9)
+        self.assertEqual(fake.calls[0][1]["cfg_weight"], 0.1)
+
 
     def test_health_and_voices(self):
         client, _fake, _mod = self._client("turbo")
@@ -174,6 +206,37 @@ class SpeechHttpTests(unittest.TestCase):
             files={"ref_audio": ("ref.wav", self.wav.read_bytes(), "audio/wav")},
         )
         self.assertEqual(res.status_code, 400)
+
+
+    def test_json_speech_cold_load_headers(self):
+        client, _server_mod, engines = self._client_unloaded()
+        res = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "tts-1",
+                "voice": "jane",
+                "input": "Hello from Chatterbox.",
+                "response_format": "wav",
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.headers.get("content-type"), "audio/wav")
+        self.assertEqual(res.headers.get("x-tts-model"), "__pretrained__")
+        self.assertEqual(res.headers.get("x-tts-load-state"), "cold")
+        self.assertEqual(res.headers.get("x-tts-input-tokens"), "unavailable")
+        self.assertRegex(res.headers.get("x-tts-processing-time-ms") or "", r"^\d+$")
+        self.assertEqual(len(engines), 1)
+        hot = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "tts-1",
+                "voice": "jane",
+                "input": "Second line.",
+                "response_format": "wav",
+            },
+        )
+        self.assertEqual(hot.status_code, 200, hot.text)
+        self.assertEqual(hot.headers.get("x-tts-load-state"), "hot")
 
 
 
@@ -327,12 +390,18 @@ class SpeechHttpTests(unittest.TestCase):
     def test_ui_voices_generation_round_trip_and_errors(self):
         client, _fake, _mod = self._client("turbo")
         payload = {
-            "generation": {"temperature": 0.0, "norm_loudness": False, "max_gen_len": 12},
+            "generation": {
+                "temperature": 0.0,
+                "norm_loudness": False,
+                "max_gen_len": 12,
+                "exaggeration": 0.5,
+                "cfg_weight": 0.25,
+            },
             "voices": {
                 "jane": {
                     "kind": "voice_clone",
                     "ref_audio": "clones/jane.wav",
-                    "generation": {"temperature": 0.6},
+                    "generation": {"temperature": 0.6, "exaggeration": 0.8},
                 }
             },
         }
@@ -341,9 +410,13 @@ class SpeechHttpTests(unittest.TestCase):
         body = res.json()["document"]
         self.assertEqual(body["generation"]["temperature"], 0.0)
         self.assertIs(body["generation"]["norm_loudness"], False)
+        self.assertEqual(body["generation"]["exaggeration"], 0.5)
+        self.assertEqual(body["generation"]["cfg_weight"], 0.25)
+        self.assertEqual(body["voices"]["jane"]["generation"]["exaggeration"], 0.8)
         again = client.get("/ui/voices").json()["document"]
         self.assertEqual(again["generation"]["temperature"], 0.0)
         self.assertIs(again["generation"]["norm_loudness"], False)
+        self.assertEqual(again["generation"]["exaggeration"], 0.5)
         bad = client.put(
             "/ui/voices",
             json={"generation": {"nope": 1}, "voices": payload["voices"]},

@@ -76,6 +76,50 @@ def supported_generate_kwargs(engine, kwargs: dict) -> dict:
     return {key: value for key, value in kwargs.items() if key in params}
 
 
+def count_input_tokens(engine, text: str) -> int | None:
+    tokenizer = getattr(engine, "tokenizer", None)
+    if tokenizer is None:
+        return None
+    tokens = None
+    for name in ("text_to_tokens", "encode"):
+        fn = getattr(tokenizer, name, None)
+        if not callable(fn):
+            continue
+        try:
+            tokens = fn(text)
+        except Exception:
+            tokens = None
+            continue
+        if tokens is None:
+            continue
+        break
+    else:
+        return None
+    if tokens is None:
+        return None
+    if hasattr(tokens, "detach"):
+        tokens = tokens.detach()
+    if hasattr(tokens, "cpu"):
+        tokens = tokens.cpu()
+    if hasattr(tokens, "numpy"):
+        tokens = tokens.numpy()
+    if hasattr(tokens, "tolist"):
+        try:
+            tokens = tokens.tolist()
+        except Exception:
+            pass
+    try:
+        flat = np.asarray(tokens, dtype=object).ravel()
+        if flat.size == 0 and tokens not in ("", b"", [], ()):
+            return None
+        return int(flat.size)
+    except Exception:
+        try:
+            return len(tokens)
+        except TypeError:
+            return None
+
+
 def call_generate(
     engine,
     variant: str,

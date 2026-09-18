@@ -22,8 +22,22 @@
     button { background: #2a4a7a; color: #fff; border: 0; padding: 0.5rem 0.9rem; cursor: pointer; }
     button:disabled { opacity: 0.5; cursor: wait; }
     #status { min-height: 1.4em; }
-    #player, #download { display: none; margin-top: 0.75rem; }
-    #download { color: #9cf; }
+    #texts { display: flex; flex-direction: column; gap: 0.5rem; }
+    .history { margin-top: 1.5rem; display: flex; flex-direction: column; gap: 0.75rem; }
+    .card {
+      background: #1c1c1c; border: 1px solid #444; padding: 0.75rem 0.9rem;
+    }
+    .card.error { border-color: #844; }
+    .card h2 { font-size: 1rem; margin: 0 0 0.4rem; }
+    .card pre {
+      white-space: pre-wrap; word-break: break-word; margin: 0.4rem 0;
+      background: #151515; padding: 0.5rem; border: 1px solid #333;
+    }
+    .card dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.2rem 0.75rem; margin: 0.5rem 0; }
+    .card dt { color: #aaa; }
+    .card dd { margin: 0; }
+    .card audio { width: 100%; margin-top: 0.5rem; }
+    .card a { color: #9cf; }
   </style>
 </head>
 <body>
@@ -36,24 +50,46 @@
       <select id="voice"></select>
       <button type="button" id="rescan">Rescan models</button>
     </div>
-    <label for="text">Text</label>
-    <textarea id="text" required></textarea>
+    <div id="texts"></div>
+    <p><button type="button" id="add-text">Add text</button></p>
     <label for="language">Language id (multilingual)</label>
     <input id="language" type="text" placeholder="en">
     <p><button type="button" id="generate">Generate</button></p>
     <p id="status"></p>
-    <audio id="player" controls></audio>
-    <a id="download" download="clip.wav">Download WAV</a>
+    <div id="history" class="history"></div>
   </main>
   <script>
     const voiceEl = document.getElementById("voice");
-    const textEl = document.getElementById("text");
     const languageEl = document.getElementById("language");
     const generateBtn = document.getElementById("generate");
+    const addTextBtn = document.getElementById("add-text");
     const statusEl = document.getElementById("status");
-    const player = document.getElementById("player");
-    const download = document.getElementById("download");
-    let objectUrl = null;
+    const textsEl = document.getElementById("texts");
+    const historyEl = document.getElementById("history");
+    const objectUrls = [];
+    let textCount = 0;
+
+    function addTextArea() {
+      textCount += 1;
+      const id = "text-" + textCount;
+      const wrap = document.createElement("div");
+      const label = document.createElement("label");
+      label.htmlFor = id;
+      label.textContent = "Text " + textCount;
+      const area = document.createElement("textarea");
+      area.id = id;
+      area.className = "line-input";
+      wrap.appendChild(label);
+      wrap.appendChild(area);
+      textsEl.appendChild(wrap);
+      return area;
+    }
+
+    function collectLines() {
+      return Array.from(textsEl.querySelectorAll("textarea.line-input"))
+        .map((el) => el.value.trim())
+        .filter((text) => text.length > 0);
+    }
 
     function fillVoices(data) {
       const rows = data.data || [];
@@ -66,6 +102,71 @@
         voiceEl.appendChild(opt);
       }
     }
+
+    function setBusy(busy) {
+      generateBtn.disabled = busy;
+      addTextBtn.disabled = busy;
+    }
+
+    function prependCard(card) {
+      historyEl.insertBefore(card, historyEl.firstChild);
+    }
+
+    function renderError(text, detail) {
+      const card = document.createElement("article");
+      card.className = "card error";
+      const title = document.createElement("h2");
+      title.textContent = "Generation failed";
+      const pre = document.createElement("pre");
+      pre.textContent = text;
+      const p = document.createElement("p");
+      p.textContent = detail;
+      card.appendChild(title);
+      card.appendChild(pre);
+      card.appendChild(p);
+      prependCard(card);
+    }
+
+    function renderResult(text, blob, headers) {
+      const url = URL.createObjectURL(blob);
+      objectUrls.push(url);
+      const card = document.createElement("article");
+      card.className = "card";
+      const title = document.createElement("h2");
+      title.textContent = headers.model || "unknown model";
+      const pre = document.createElement("pre");
+      pre.textContent = text;
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.src = url;
+      const download = document.createElement("a");
+      download.href = url;
+      download.download = "clip.wav";
+      download.textContent = "Download WAV";
+      const dl = document.createElement("dl");
+      const rows = [
+        ["Voice / variant", [headers.voice, headers.variant].filter(Boolean).join(" · ") || "—"],
+        ["Processing", headers.ms ? headers.ms + " ms" : "—"],
+        ["Input tokens", headers.tokens || "unavailable"],
+        ["Load state", headers.load || "—"],
+      ];
+      for (const [k, v] of rows) {
+        const dt = document.createElement("dt");
+        dt.textContent = k;
+        const dd = document.createElement("dd");
+        dd.textContent = v;
+        dl.appendChild(dt);
+        dl.appendChild(dd);
+      }
+      card.appendChild(title);
+      card.appendChild(pre);
+      card.appendChild(audio);
+      card.appendChild(download);
+      card.appendChild(dl);
+      prependCard(card);
+    }
+
+    addTextArea();
 
     fetch("/v1/voices").then((r) => r.json()).then(fillVoices).catch((err) => {
       statusEl.textContent = String(err);
@@ -90,41 +191,63 @@
       }
     });
 
+    addTextBtn.addEventListener("click", () => {
+      addTextArea().focus();
+    });
+
+    window.addEventListener("pagehide", () => {
+      for (const url of objectUrls) URL.revokeObjectURL(url);
+      objectUrls.length = 0;
+    });
+
     generateBtn.addEventListener("click", async () => {
-      const text = textEl.value.trim();
-      if (!text) { statusEl.textContent = "empty input"; return; }
-      generateBtn.disabled = true;
+      const lines = collectLines();
+      if (!lines.length) { statusEl.textContent = "empty input"; return; }
+      setBusy(true);
       statusEl.textContent = "generating…";
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      const body = {
-        model: "tts-1",
-        voice: voiceEl.value,
-        input: text,
-        response_format: "wav",
-      };
-      if (languageEl.value.trim()) body.language = languageEl.value.trim();
+      let ok = 0;
+      let failed = 0;
       try {
-        const res = await fetch("/v1/audio/speech", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          statusEl.textContent = err.detail || ("http " + res.status);
-          return;
+        for (const text of lines) {
+          const body = {
+            model: "tts-1",
+            voice: voiceEl.value,
+            input: text,
+            response_format: "wav",
+          };
+          if (languageEl.value.trim()) body.language = languageEl.value.trim();
+          try {
+            const res = await fetch("/v1/audio/speech", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body),
+            });
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              failed += 1;
+              renderError(text, err.detail || ("http " + res.status));
+              continue;
+            }
+            const blob = await res.blob();
+            ok += 1;
+            renderResult(text, blob, {
+              model: res.headers.get("x-tts-model") || "",
+              voice: res.headers.get("x-tts-voice-used") || voiceEl.value,
+              variant: res.headers.get("x-tts-variant") || "",
+              ms: res.headers.get("x-tts-processing-time-ms") || "",
+              tokens: res.headers.get("x-tts-input-tokens") || "unavailable",
+              load: res.headers.get("x-tts-load-state") || "",
+            });
+          } catch (err) {
+            failed += 1;
+            renderError(text, String(err));
+          }
         }
-        const blob = await res.blob();
-        objectUrl = URL.createObjectURL(blob);
-        player.src = objectUrl;
-        player.style.display = "block";
-        download.href = objectUrl;
-        download.style.display = "inline";
-        statusEl.textContent = "voice " + (res.headers.get("x-tts-voice-used") || voiceEl.value);
-      } catch (err) {
-        statusEl.textContent = String(err);
+        statusEl.textContent = failed
+          ? ("generated " + ok + ", failed " + failed)
+          : ("generated " + ok);
       } finally {
-        generateBtn.disabled = false;
+        setBusy(false);
       }
     });
   </script>
