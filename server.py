@@ -16,6 +16,7 @@ import io
 import json
 import os
 import subprocess
+import time
 import tempfile
 import threading
 from pathlib import Path
@@ -30,7 +31,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from adapter import call_generate, load_engine
+from adapter import call_generate, count_input_tokens, load_engine
 from device import select_device
 from models import (
     GENERATION_KEYS,
@@ -763,7 +764,10 @@ def _run_speech(
         else:
             preset = overlay_generation(voice, voice_overlays) or overlay_generation(used, voice_overlays)
         merged = merge_generation(generation_defaults, preset)
+        load_state = "hot" if key in loaded else "cold"
+        started = time.perf_counter()
         eng, variant = _ensure_engine(key)
+        token_count = count_input_tokens(eng, text)
         print(
             f"speech public={MODEL_NAME} engine={key!r} variant={variant} voice={voice!r} -> {used} "
             f"format={fmt} chars={len(text)} fallback={fell_back} ref={prompt_path!r} "
@@ -776,8 +780,8 @@ def _run_speech(
             text,
             audio_prompt_path=prompt_path,
             language=language,
-            exaggeration=TTS_EXAGGERATION,
-            cfg_weight=TTS_CFG_WEIGHT,
+            exaggeration=merged.get("exaggeration", TTS_EXAGGERATION),
+            cfg_weight=merged.get("cfg_weight", TTS_CFG_WEIGHT),
             temperature=merged.get("temperature"),
             top_k=merged.get("top_k"),
             top_p=merged.get("top_p"),
@@ -786,15 +790,32 @@ def _run_speech(
             norm_loudness=merged.get("norm_loudness"),
         )
     body, media = encode_audio(audio, sr, fmt)
-    return key, used, fell_back, reason, body, media, speed is not None
+    processing_ms = (time.perf_counter() - started) * 1000.0
+    return key, used, fell_back, reason, body, media, speed is not None, processing_ms, token_count, load_state
 
 
 
-def _speech_response(mid, used, fell_back, reason, body, media, speed_ignored: bool):
+
+
+def _speech_response(
+    mid,
+    used,
+    fell_back,
+    reason,
+    body,
+    media,
+    speed_ignored: bool,
+    processing_ms: float,
+    token_count: int | None,
+    load_state: str,
+):
     headers = {
         "X-TTS-Voice-Used": used,
         "X-TTS-Model": mid,
         "X-TTS-Variant": engine_variant_by.get(mid, VARIANT),
+        "X-TTS-Processing-Time-Ms": f"{processing_ms:.0f}",
+        "X-TTS-Input-Tokens": "unavailable" if token_count is None else str(int(token_count)),
+        "X-TTS-Load-State": load_state,
     }
     if fell_back:
         headers["X-TTS-Fell-Back"] = "1"
@@ -802,6 +823,8 @@ def _speech_response(mid, used, fell_back, reason, body, media, speed_ignored: b
     if speed_ignored:
         headers["X-TTS-Speed-Ignored"] = "1"
     return Response(content=body, media_type=media, headers=headers)
+
+
 
 
 
@@ -826,22 +849,26 @@ async def _openai_speech_multipart(request: Request):
     try:
         tmp.write(raw)
         tmp.close()
-        mid, used, fell_back, reason, body, media, speed_ignored = await asyncio.to_thread(
-            _run_speech,
-            voice,
-            text,
-            language,
-            fmt,
-            tmp.name,
-            ref_text,
-            speed,
+        mid, used, fell_back, reason, body, media, speed_ignored, processing_ms, token_count, load_state = (
+            await asyncio.to_thread(
+                _run_speech,
+                voice,
+                text,
+                language,
+                fmt,
+                tmp.name,
+                ref_text,
+                speed,
+            )
         )
     finally:
         try:
             Path(tmp.name).unlink(missing_ok=True)
         except OSError:
             pass
-    return _speech_response(mid, used, fell_back, reason, body, media, speed_ignored)
+    return _speech_response(
+        mid, used, fell_back, reason, body, media, speed_ignored, processing_ms, token_count, load_state
+    )
 
 
 @app.post("/v1/audio/speech")
@@ -863,21 +890,25 @@ async def openai_speech(request: Request):
     fmt = (req.response_format or "mp3").lower().strip()
     language = req.language or DEFAULT_LANGUAGE
     try:
-        mid, used, fell_back, reason, body, media, speed_ignored = await asyncio.to_thread(
-            _run_speech,
-            str(req.voice or ""),
-            text,
-            language,
-            fmt,
-            None,
-            None,
-            req.speed,
+        mid, used, fell_back, reason, body, media, speed_ignored, processing_ms, token_count, load_state = (
+            await asyncio.to_thread(
+                _run_speech,
+                str(req.voice or ""),
+                text,
+                language,
+                fmt,
+                None,
+                None,
+                req.speed,
+            )
         )
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc))
-    return _speech_response(mid, used, fell_back, reason, body, media, speed_ignored)
+    return _speech_response(
+        mid, used, fell_back, reason, body, media, speed_ignored, processing_ms, token_count, load_state
+    )
 
 
 if __name__ == "__main__":

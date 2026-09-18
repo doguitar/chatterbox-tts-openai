@@ -28,7 +28,7 @@ A **pack** is a train export (`pack.json`, merged T3 weights, tokenizer, `refere
 
 JSON fields: `input`/`text`, `voice`, `model`, `language`, `response_format`, `speed` (ignored). Formats: `wav`, `pcm`, `mp3`, `opus`, `aac`, `flac`.
 
-Response headers: `X-TTS-Voice-Used` (alias), `X-TTS-Model` (engine cache key: pack name or `__pretrained__`), `X-TTS-Variant`.
+Response headers: `X-TTS-Voice-Used` (alias), `X-TTS-Model` (engine cache key: pack name or `__pretrained__`), `X-TTS-Variant`, `X-TTS-Processing-Time-Ms` (integer milliseconds for load + generate + encode), `X-TTS-Input-Tokens` (tokenizer id count, or `unavailable`), `X-TTS-Load-State` (`hot` if the cache key was already resident, else `cold`).
 
 ## Variants (`TTS_VARIANT`)
 
@@ -109,7 +109,7 @@ If load hits CUDA/CPU **out of memory**, the least-recent other pack is unloaded
 }
 ```
 
-Top-level `"generation"` sets Turbo/Nano defaults (`temperature`, `top_k`, `top_p`, `repetition_penalty`, `max_gen_len`, `norm_loudness`). The same object may appear on a clone alias or in a pack's `pack.json`. Precedence is global config, then the selected clone or pack preset. Omitted keys keep the upstream Chatterbox defaults. The adapter forwards only keys present on the installed `generate()` signature; older Turbo builds omit `max_gen_len`. These controls do not repair a bad checkpoint.
+Top-level `"generation"` sets defaults (`temperature`, `top_k`, `top_p`, `repetition_penalty`, `max_gen_len`, `norm_loudness`, `exaggeration`, `cfg_weight`). The same object may appear on a clone alias or in a pack's `pack.json`. Precedence is global config, then the selected clone or pack preset. `exaggeration` and `cfg_weight` apply to english/multilingual; Turbo/Nano sampling keys apply to turbo/nano. Omitted keys keep the upstream Chatterbox defaults (or `TTS_EXAGGERATION` / `TTS_CFG_WEIGHT` when those env vars are set and the preset omits the key). The adapter forwards only keys present on the installed `generate()` signature; older Turbo builds omit `max_gen_len`. These controls do not repair a bad checkpoint.
 
 `ref_audio` must be a `.wav` under the config directory (or a pack-relative path resolved under `/models`). Missing / non-WAV / out-of-root paths return HTTP 400. `ref_text` and `instructions` are metadata; generation uses the WAV.
 

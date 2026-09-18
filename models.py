@@ -20,6 +20,8 @@ GENERATION_KEYS = (
     "repetition_penalty",
     "max_gen_len",
     "norm_loudness",
+    "exaggeration",
+    "cfg_weight",
 )
 _GENERATION_INT_KEYS = frozenset({"top_k", "max_gen_len"})
 _GENERATION_BOOL_KEYS = frozenset({"norm_loudness"})
