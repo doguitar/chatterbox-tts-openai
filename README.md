@@ -18,7 +18,7 @@ A **pack** is a train export (`pack.json`, merged T3 weights, tokenizer, `refere
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/health` | `ok`, `variant`, voice list, `loaded` (resident engine keys), `models` (discovered packs) |
+| GET | `/health` | `ok`, `variant`, voice list, `loaded` (resident engine keys), `models` (packs plus stock `__pretrained__`) |
 | GET | `/v1/models` | public id `tts-1` (override with `TTS_MODEL_NAME`) |
 | GET | `/v1/voices` | pack names plus `voices.json` aliases; built-in `default` for `english` / `multilingual` |
 | POST | `/v1/audio/speech` | JSON or multipart clone |
@@ -84,21 +84,32 @@ If load hits CUDA/CPU **out of memory**, the least-recent other pack is unloaded
 
 **Hub downloads** happen when an engine actually loads (`from_pretrained`), not on a lazy boot with no speech. Persist them with a writable `HF_HOME` volume. Packs stay on `/models`.
 
-`TTS_DEFAULT_MODEL` selects which pack `one`/`all` load first (pack `name` or folder name). Rescan re-reads the catalog; engines for packs that disappeared are unloaded.
+`TTS_DEFAULT_MODEL` selects which pack `one`/`all` load first (pack `name` or folder name). Rescan re-reads the catalog; engines for packs that disappeared are unloaded. `/health` and `/ui/rescan` always list `__pretrained__` as the stock/base engine (`path: "(pretrained)"`, `kind` = active `TTS_VARIANT`) without downloading Hub weights. `loaded` becomes true only after that engine is actually resident.
 
 ## voices.json
 
 ```json
 {
+  "generation": {
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "top_k": 1000,
+    "repetition_penalty": 1.2,
+    "max_gen_len": 1000,
+    "norm_loudness": true
+  },
   "voices": {
     "jane": {
       "kind": "voice_clone",
       "ref_audio": "clones/jane.wav",
-      "ref_text": "Transcript of the reference clip."
+      "ref_text": "Transcript.",
+      "generation": {"temperature": 0.7}
     }
   }
 }
 ```
+
+Top-level `"generation"` sets Turbo/Nano defaults (`temperature`, `top_k`, `top_p`, `repetition_penalty`, `max_gen_len`, `norm_loudness`). The same object may appear on a clone alias or in a pack's `pack.json`. Precedence is global config, then the selected clone or pack preset. Omitted keys keep the upstream Chatterbox defaults. The adapter forwards only keys present on the installed `generate()` signature; older Turbo builds omit `max_gen_len`. These controls do not repair a bad checkpoint.
 
 `ref_audio` must be a `.wav` under the config directory (or a pack-relative path resolved under `/models`). Missing / non-WAV / out-of-root paths return HTTP 400. `ref_text` and `instructions` are metadata; generation uses the WAV.
 
@@ -202,6 +213,22 @@ curl -sS http://127.0.0.1:8080/v1/audio/speech \
   -F response_format=wav \
   --output clone.wav
 ```
+
+
+## Base vs pack diagnostic
+
+Hold the same reference WAV and a fixed `input`. Use `response_format: "wav"` so pauses and trailing audio are not MP3-encoded.
+
+1. Configure a clone alias (`jane`) with a valid WAV longer than the Chatterbox reference requirement.
+2. `POST /v1/audio/speech` with that alias. Record `X-TTS-Model: __pretrained__`.
+3. Repeat the same `input` and reference-conditioned pack voice. Record `X-TTS-Model` as the pack name.
+
+Interpretation:
+
+- Stock and pack both show long pauses or truncation → inspect text segmentation, Turbo sampling/`max_gen_len`, the reference WAV, or the installed Chatterbox revision. This is not evidence that the Docker image is the cause.
+- Only the pack shows it → inspect training clips, transcript/audio alignment, incomplete endings, and merged T3/tokenizer integrity.
+
+A base comparison cannot remove reference-conditioning effects; keep the WAV constant. Turbo still requires `audio_prompt_path`. A low positive clone `max_gen_len` can truncate endings on purpose as a sampling diagnostic, not as a default.
 
 ## Tests
 

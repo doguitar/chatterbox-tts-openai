@@ -16,10 +16,13 @@ from models import (
     listed_voice_names,
     lru_touch,
     lru_victim,
+    merge_generation,
     overlay_clone_ref,
+    overlay_generation,
     overlay_instructions,
     overlay_kind,
     pack_voice_overlays,
+    parse_generation_config,
     parse_load_policy,
     parse_variant,
     parse_voice_overlays,
@@ -139,6 +142,7 @@ class OverlayHelpersTests(unittest.TestCase):
         self.assertEqual(overlay_kind("jane", overlays), "voice_clone")
         self.assertEqual(overlay_instructions("jane", overlays), "warm")
         self.assertEqual(overlay_clone_ref("jane", overlays), ("clones/jane.wav", "Hello."))
+        self.assertIsNone(overlay_generation("jane", overlays))
 
 
 class ResolveVoiceTests(unittest.TestCase):
@@ -215,6 +219,7 @@ class DiscoverPacksTests(unittest.TestCase):
                         "model": "turbo-lora",
                         "reference": "reference.wav",
                         "engine": "chatterbox-turbo",
+                        "generation": {"max_gen_len": 900, "norm_loudness": False},
                     }
                 ),
                 encoding="utf-8",
@@ -227,6 +232,7 @@ class DiscoverPacksTests(unittest.TestCase):
             self.assertEqual(overlays[0].alias, "alice")
             self.assertEqual(overlays[0].model, "alice")
             self.assertEqual(overlays[0].kind, "voice_clone")
+            self.assertEqual(overlays[0].generation, {"max_gen_len": 900, "norm_loudness": False})
             wav = resolve_reference_wav(overlays[0].ref_audio, root)
             self.assertEqual(wav, (pack / "reference.wav").resolve())
             jane = VoiceOverlay("jane", "", None, "", "voice_clone", "clones/jane.wav", "")
@@ -250,6 +256,79 @@ class EngineCacheHelperTests(unittest.TestCase):
     def test_memory_full_error(self):
         self.assertTrue(is_memory_full_error(RuntimeError("CUDA out of memory")))
         self.assertFalse(is_memory_full_error(RuntimeError("missing weights")))
+
+
+class GenerationConfigTests(unittest.TestCase):
+    def test_parse_preserves_zero_and_false(self):
+        parsed = parse_generation_config(
+            {"temperature": 0.0, "norm_loudness": False, "top_k": 1, "max_gen_len": 1}
+        )
+        self.assertEqual(parsed["temperature"], 0.0)
+        self.assertIs(parsed["norm_loudness"], False)
+        self.assertEqual(parsed["top_k"], 1)
+
+    def test_missing_is_none(self):
+        self.assertIsNone(parse_generation_config(None))
+
+    def test_merge_precedence(self):
+        merged = merge_generation(
+            {"temperature": 0.8, "max_gen_len": 1200},
+            {"temperature": 0.6},
+        )
+        self.assertEqual(merged, {"temperature": 0.6, "max_gen_len": 1200})
+
+    def test_rejects_unknown_type_nonfinite_and_zero_ints(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_generation_config({"nope": 1}, prefix="generation")
+        self.assertIn("generation.nope", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            parse_generation_config({"temperature": "hot"}, prefix="jane: generation")
+        self.assertIn("jane: generation.temperature", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            parse_generation_config({"top_k": 0})
+        self.assertIn("top_k", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            parse_generation_config({"max_gen_len": 0})
+        self.assertIn("max_gen_len", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            parse_generation_config({"top_p": float("nan")})
+        self.assertIn("finite", str(ctx.exception))
+        with self.assertRaises(ValueError) as ctx:
+            parse_generation_config({"norm_loudness": 1})
+        self.assertIn("boolean", str(ctx.exception))
+
+    def test_validate_global_and_clone(self):
+        out = validate_voices_document(
+            {
+                "generation": {"temperature": 0.0, "norm_loudness": False},
+                "voices": {
+                    "jane": {
+                        "kind": "voice_clone",
+                        "ref_audio": "clones/jane.wav",
+                        "generation": {"temperature": 0.6},
+                    }
+                },
+            }
+        )
+        self.assertEqual(out["generation"]["temperature"], 0.0)
+        self.assertIs(out["generation"]["norm_loudness"], False)
+        self.assertEqual(out["voices"]["jane"]["generation"], {"temperature": 0.6})
+
+    def test_parse_voice_overlay_generation(self):
+        overlays = parse_voice_overlays(
+            {
+                "voices": {
+                    "jane": {
+                        "kind": "voice_clone",
+                        "ref_audio": "clones/jane.wav",
+                        "generation": {"temperature": 0.7},
+                    }
+                }
+            },
+            "",
+        )
+        self.assertEqual(overlay_generation("jane", overlays), {"temperature": 0.7})
+
 
 
 if __name__ == "__main__":

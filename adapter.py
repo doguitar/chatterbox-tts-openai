@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -28,6 +29,12 @@ def generation_kwargs(
     language: str | None,
     exaggeration: float | None,
     cfg_weight: float | None,
+    temperature: float | None = None,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    repetition_penalty: float | None = None,
+    max_gen_len: int | None = None,
+    norm_loudness: bool | None = None,
 ) -> dict:
     variant = parse_variant(variant)
     kwargs: dict = {}
@@ -40,7 +47,33 @@ def generation_kwargs(
             kwargs["exaggeration"] = float(exaggeration)
         if cfg_weight is not None:
             kwargs["cfg_weight"] = float(cfg_weight)
+    if variant in {"turbo", "nano"}:
+        if temperature is not None:
+            kwargs["temperature"] = float(temperature)
+        if top_k is not None:
+            kwargs["top_k"] = int(top_k)
+        if top_p is not None:
+            kwargs["top_p"] = float(top_p)
+        if repetition_penalty is not None:
+            kwargs["repetition_penalty"] = float(repetition_penalty)
+        if max_gen_len is not None:
+            kwargs["max_gen_len"] = int(max_gen_len)
+        if norm_loudness is not None:
+            kwargs["norm_loudness"] = bool(norm_loudness)
     return kwargs
+
+
+def supported_generate_kwargs(engine, kwargs: dict) -> dict:
+    generate = getattr(engine, "generate", None)
+    if generate is None:
+        return kwargs
+    try:
+        params = inspect.signature(generate).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key in params}
 
 
 def call_generate(
@@ -52,6 +85,12 @@ def call_generate(
     language: str | None = None,
     exaggeration: float | None = None,
     cfg_weight: float | None = None,
+    temperature: float | None = None,
+    top_k: int | None = None,
+    top_p: float | None = None,
+    repetition_penalty: float | None = None,
+    max_gen_len: int | None = None,
+    norm_loudness: bool | None = None,
 ) -> tuple[np.ndarray, int]:
     kwargs = generation_kwargs(
         variant,
@@ -59,8 +98,14 @@ def call_generate(
         language=language,
         exaggeration=exaggeration,
         cfg_weight=cfg_weight,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        repetition_penalty=repetition_penalty,
+        max_gen_len=max_gen_len,
+        norm_loudness=norm_loudness,
     )
-    wav = engine.generate(text, **kwargs)
+    wav = engine.generate(text, **supported_generate_kwargs(engine, kwargs))
     sr = int(getattr(engine, "sr", 24000))
     return tensor_to_float32_1d(wav), sr
 

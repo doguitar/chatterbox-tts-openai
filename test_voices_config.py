@@ -116,6 +116,24 @@ class ValidateVoicesDocumentTests(unittest.TestCase):
         )
         self.assertEqual(out["voices"]["n"]["instructions"], "warm")
 
+    def test_preserves_generation_zero_and_false(self):
+        out = validate_voices_document(
+            {
+                "generation": {"temperature": 0.0, "norm_loudness": False},
+                "voices": {
+                    "jane": {
+                        "kind": "voice_clone",
+                        "ref_audio": "clones/jane.wav",
+                        "generation": {"temperature": 0.0, "norm_loudness": False},
+                    }
+                },
+            }
+        )
+        self.assertEqual(out["generation"]["temperature"], 0.0)
+        self.assertIs(out["generation"]["norm_loudness"], False)
+        self.assertEqual(out["voices"]["jane"]["generation"]["temperature"], 0.0)
+        self.assertIs(out["voices"]["jane"]["generation"]["norm_loudness"], False)
+
 
 class WriteVoicesDocumentTests(unittest.TestCase):
     def test_round_trip(self):

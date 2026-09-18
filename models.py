@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import NamedTuple
@@ -11,6 +12,67 @@ PUBLIC_MODEL_ALIASES = frozenset({"tts-1", "chatterbox-tts"})
 ENGINE_VARIANTS = frozenset({"turbo", "nano", "english", "multilingual"})
 BUILTIN_DEFAULT_VOICE = "default"
 ENGINE_SAMPLE_RATE = 24000
+
+GENERATION_KEYS = (
+    "temperature",
+    "top_k",
+    "top_p",
+    "repetition_penalty",
+    "max_gen_len",
+    "norm_loudness",
+)
+_GENERATION_INT_KEYS = frozenset({"top_k", "max_gen_len"})
+_GENERATION_BOOL_KEYS = frozenset({"norm_loudness"})
+GenerationValue = int | float | bool
+GenerationConfig = dict[str, GenerationValue]
+
+
+def parse_generation_config(raw: object | None, *, prefix: str = "generation") -> GenerationConfig | None:
+    """Strict generation-config parser. None means missing; {} is an explicit empty object."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{prefix} must be an object")
+    out: GenerationConfig = {}
+    for key, value in raw.items():
+        loc = f"{prefix}.{key}"
+        if key not in GENERATION_KEYS:
+            raise ValueError(f"{loc} unknown key")
+        if key in _GENERATION_BOOL_KEYS:
+            if type(value) is not bool:
+                raise ValueError(f"{loc} must be a boolean")
+            out[key] = value
+            continue
+        if key in _GENERATION_INT_KEYS:
+            if type(value) is bool or type(value) is not int:
+                raise ValueError(f"{loc} must be a positive integer")
+            if value < 1:
+                raise ValueError(f"{loc} must be >= 1")
+            out[key] = value
+            continue
+        if type(value) is bool or not isinstance(value, (int, float)):
+            raise ValueError(f"{loc} must be a number")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"{loc} must be finite")
+        out[key] = number
+    return out
+
+
+def merge_generation(*layers: GenerationConfig | None) -> GenerationConfig:
+    merged: GenerationConfig = {}
+    for layer in layers:
+        if layer:
+            merged.update(layer)
+    return merged
+
+
+def try_parse_generation(raw: object | None, *, prefix: str = "generation") -> GenerationConfig | None:
+    try:
+        return parse_generation_config(raw, prefix=prefix)
+    except ValueError:
+        return None
+
 MULTILINGUAL_LANGUAGES = (
     "ar",
     "da",
@@ -115,7 +177,8 @@ def pack_voice_overlays(packs: list[tuple[str, Path, dict]]) -> list[VoiceOverla
     for alias, path, data in packs:
         ref = str(data.get("reference") or "reference.wav").strip() or "reference.wav"
         rel = f"{path.name}/{ref}".replace("\\", "/")
-        out.append(VoiceOverlay(alias, "", alias, "", "voice_clone", rel, ""))
+        gen = try_parse_generation(data.get("generation"), prefix=f"{alias}: generation")
+        out.append(VoiceOverlay(alias, "", alias, "", "voice_clone", rel, "", gen))
     return out
 
 
@@ -213,6 +276,7 @@ class VoiceOverlay(NamedTuple):
     kind: str
     ref_audio: str
     ref_text: str
+    generation: GenerationConfig | None = None
 
 
 def parse_voice_overlays(data: object | None, env_speakers: str) -> list[VoiceOverlay]:
@@ -236,8 +300,11 @@ def parse_voice_overlays(data: object | None, env_speakers: str) -> list[VoiceOv
                     if kind == "voice_clone" or ref_audio or ref_text:
                         kind = "voice_clone"
                         speaker = str(spec.get("speaker") or "")
+                    gen = try_parse_generation(spec.get("generation"), prefix=f"{name}: generation")
                     out.append(
-                        VoiceOverlay(str(name), speaker, model_id or None, preset, kind, ref_audio, ref_text)
+                        VoiceOverlay(
+                            str(name), speaker, model_id or None, preset, kind, ref_audio, ref_text, gen
+                        )
                     )
         elif isinstance(voices, list):
             for name in voices:
@@ -330,6 +397,10 @@ def validate_voices_document(data: object) -> dict:
                     stripped = instructions.strip()
                     if stripped:
                         entry["instructions"] = stripped
+                if "generation" in spec:
+                    parsed = parse_generation_config(spec.get("generation"), prefix=f"{key}: generation")
+                    if parsed is not None:
+                        entry["generation"] = parsed
                 normalized[key] = entry
                 continue
             speaker = spec.get("speaker")
@@ -349,10 +420,19 @@ def validate_voices_document(data: object) -> dict:
                 stripped = instructions.strip()
                 if stripped:
                     entry["instructions"] = stripped
+            if "generation" in spec:
+                parsed = parse_generation_config(spec.get("generation"), prefix=f"{key}: generation")
+                if parsed is not None:
+                    entry["generation"] = parsed
             normalized[key] = entry
             continue
         raise ValueError(f"{key}: value must be a string or object")
-    return {"voices": normalized}
+    out: dict = {"voices": normalized}
+    if "generation" in data:
+        parsed = parse_generation_config(data.get("generation"), prefix="generation")
+        if parsed is not None:
+            out["generation"] = parsed
+    return out
 
 
 def write_voices_document(path: Path, document: dict) -> None:
@@ -392,6 +472,15 @@ def overlay_clone_ref(name: str, overlays: list[VoiceOverlay]) -> tuple[str, str
         if item.alias.strip().lower() == key:
             ref = (item.ref_audio, item.ref_text)
     return ref
+
+
+def overlay_generation(name: str, overlays: list[VoiceOverlay]) -> GenerationConfig | None:
+    key = (name or "").strip().lower()
+    generation = None
+    for item in overlays:
+        if item.alias.strip().lower() == key:
+            generation = item.generation
+    return generation
 
 
 def path_under(path: Path, root: Path) -> bool:
